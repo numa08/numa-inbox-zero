@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>numa-inbox-zero: Gmail 未読の自動分類（7-21時は4時間おき + 深夜3時）</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <!-- 7:00 起点、4時間おき、14時間の窓（= 7:00, 11:00, 15:00, 19:00） -->
+    <CalendarTrigger>
+      <StartBoundary>2026-08-04T07:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+      <Repetition>
+        <Interval>PT4H</Interval>
+        <Duration>PT14H</Duration>
+        <StopAtDurationEnd>false</StopAtDurationEnd>
+      </Repetition>
+    </CalendarTrigger>
+    <!-- 深夜 3:00 に 1 回 -->
+    <CalendarTrigger>
+      <StartBoundary>2026-08-04T03:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>DOMAIN\USERNAME</UserId>
+      <!-- S4U: パスワードを保存せず、ログオンしていなくても実行できる -->
+      <LogonType>S4U</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <!-- PC がスリープ等で時刻を逃した場合、次に起きたとき実行する -->
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>
+    <WakeToRun>false</WakeToRun>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>C:\Windows\System32\wsl.exe</Command>
+      <Arguments>-d Ubuntu -e /path/to/numa-inbox-zero/run.sh</Arguments>
+    </Exec>
+  </Actions>
+</Task>

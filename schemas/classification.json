@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "message_id": { "type": "string" },
+          "action": { "enum": ["archive", "star", "reply"] },
+          "confidence": { "enum": ["high", "low"] },
+          "reason": { "type": "string", "maxLength": 200 },
+          "draft_body": { "type": ["string", "null"] }
+        },
+        "required": ["message_id", "action", "confidence", "reason"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["decisions"],
+  "additionalProperties": false
+}

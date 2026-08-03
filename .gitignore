@@ -1,0 +1,30 @@
+# 認証情報 — 絶対にコミットしない
+credentials.json
+token.json
+.env
+.env.local
+# op:// 参照のみだが vault 構成を晒さないため除外（テンプレは .env.op.example）
+.env.op
+
+# ローカル環境固有（Windows ユーザー名・ローカルパスを含む。テンプレは task-scheduler.example.xml）
+task-scheduler.xml
+
+# Claude Code のローカル設定
+.claude/settings.local.json
+
+# 実行時生成物
+work/
+logs/
+
+# 評価データ — 実メールの本文を含むためコミットしない（eval/README.md は残す）
+eval/golden.jsonl
+eval/results/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+dist/

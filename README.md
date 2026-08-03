@@ -1,6 +1,6 @@
 # numa-inbox-zero
 
-Gmail の未読メールを Claude で分類し、アーカイブ / スター / 返信ドラフト作成を自動実行する個人用ツール。設計の詳細は [SPEC.md](SPEC.md)。ライセンスは [MIT](LICENSE)。
+Gmail の受信トレイの未処理メールを Claude で分類し、アーカイブ / スター / 返信ドラフト作成を自動実行する個人用ツール。設計の詳細は [SPEC.md](SPEC.md)。ライセンスは [MIT](LICENSE)。
 
 ## セットアップ
 

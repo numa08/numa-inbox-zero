@@ -1,6 +1,6 @@
 # numa-inbox-zero 仕様書
 
-Gmail の未読メールを Claude で分類し、アーカイブ / スター / 返信ドラフト作成を自動実行する個人用スクリプト。
+Gmail の受信トレイの未処理メールを Claude で分類し、アーカイブ / スター / 返信ドラフト作成を自動実行する個人用スクリプト。
 
 ## 1. 全体構成
 
@@ -56,14 +56,16 @@ Gmail の未読メールを Claude で分類し、アーカイブ / スター / 
 ### 取得クエリ
 
 ```
-is:unread in:inbox -label:numa-inbox-zero/processed newer_than:7d
+in:inbox -is:starred -label:numa-inbox-zero/processed newer_than:7d
 ```
 
-- `-label:numa-inbox-zero/processed` により、一度処理したメールは次回以降スキップされる。スターを付けて受信トレイに残したメールが毎回再分類されてドラフトが増殖する問題を構造的に防ぐ。
+- 既読/未読は問わない。通知を開いただけで既読になったメール（読む意図はなかったが既読が付いたケース）を取りこぼさないため。再処理防止は `is:unread` ではなく processed ラベルが担うので、既読を含めても二重処理は起きない。
+- `-is:starred` により、手動でスターを付けたメールは対象外になる。「意図的に受信トレイに残す」という意思表示はスターで行う運用。ツール自身が star / reply で付けたスターも一致するが、これらは processed ラベルでも既に除外されている。
+- `-label:numa-inbox-zero/processed` により、一度処理したメールは次回以降スキップされる。処理済みメールが毎回再分類されてドラフトが増殖する問題を構造的に防ぐ。
 - `newer_than:7d` は初回実行時の暴発防止。定常運転（30件/日）では実質無効。
 - 1回あたりの上限 `MAX_MESSAGES_PER_RUN = 50`。超過分は次回に回す。
 
-**`newer_than:7d` は「後回し」ではなく「永久に無視」である。** 7日より古い未読メールは一度もラベルが付かないまま、以後どの実行でもクエリに引っかからない。時間が経てばさらに古くなるだけで、自動的に処理される日は来ない。初回実行時点で 7日より古い未読が残っている場合は、手動で片付けるか、一時的に `newer_than` を外して 1 回流す必要がある（§10）。
+**`newer_than:7d` は「後回し」ではなく「永久に無視」である。** 7日より古いメールは一度もラベルが付かないまま、以後どの実行でもクエリに引っかからない。時間が経てばさらに古くなるだけで、自動的に処理される日は来ない。初回実行時点で 7日より古い未処理メールが残っている場合は、手動で片付けるか、一時的に `newer_than` を外して 1 回流す必要がある（§10）。
 
 ### 出力: inbox.json
 
@@ -71,7 +73,7 @@ is:unread in:inbox -label:numa-inbox-zero/processed newer_than:7d
 {
   "run_id": "2026-08-03T09:00:12+09:00_a1b2c3",
   "fetched_at": "2026-08-03T09:00:12+09:00",
-  "query": "is:unread in:inbox -label:numa-inbox-zero/processed newer_than:7d",
+  "query": "in:inbox -is:starred -label:numa-inbox-zero/processed newer_than:7d",
   "messages": [
     {
       "message_id": "18f2a3b4c5d6e7f8",
@@ -236,7 +238,7 @@ claude -p \
   "duration_ms": 29104,
   "mode": "apply",
   "fetch": {
-    "query": "is:unread in:inbox -label:numa-inbox-zero/processed newer_than:7d",
+    "query": "in:inbox -is:starred -label:numa-inbox-zero/processed newer_than:7d",
     "candidates": 27,
     "truncated_bodies": 3,
     "input_chars": 21840
@@ -367,7 +369,7 @@ numa-inbox-zero/
 
 - `policy.md` の初期ルール内容。実際の受信内容を見ながら書く必要がある。
 - 返信ドラフトのトーン（丁寧語のレベル、署名の有無）。
-- 初回実行時に既存の未読が大量にある場合の扱い。`newer_than:7d` より古い未読は永久に無視されるため（§3）、以下のいずれかを選ぶ必要がある: (a) 手動で片付ける、(b) 初回だけ `newer_than` を外して全件流す（件数次第でコストが跳ねる）、(c) `newer_than:90d` 等で段階的に広げる。
+- 初回実行時に既存の未処理メールが大量にある場合の扱い。`newer_than:7d` より古いメールは永久に無視されるため（§3）、以下のいずれかを選ぶ必要がある: (a) 手動で片付ける、(b) 初回だけ `newer_than` を外して全件流す（件数次第でコストが跳ねる）、(c) `newer_than:90d` 等で段階的に広げる。
 
 ## 11. 実装時の注意
 

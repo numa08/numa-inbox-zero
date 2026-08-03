@@ -112,8 +112,8 @@ def ensure_processed_label(service) -> str:
     return created["id"]
 
 
-def fetch_unread_messages(service, query: str, max_results: int, body_limit: int) -> list[dict]:
-    """クエリに一致する未読メールを取得し、分類器に渡す形へ整形する。"""
+def fetch_inbox_messages(service, query: str, max_results: int, body_limit: int) -> list[dict]:
+    """クエリに一致する受信トレイのメールを取得し、分類器に渡す形へ整形する。"""
     listing = (
         service.users().messages().list(userId="me", q=query, maxResults=max_results).execute()
     )

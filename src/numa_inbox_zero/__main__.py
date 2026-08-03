@@ -2,7 +2,7 @@
 
 サブコマンド:
   auth      OAuth フローを起動して token.json を作る（初回のみ・対話環境）
-  fetch     未読メールを取得して work/inbox.json に書く
+  fetch     受信トレイの未処理メールを取得して work/inbox.json に書く
   classify  work/inbox.json を claude -p で分類し work/classification.json に書く
   apply     分類結果を検証して Gmail に適用する
   run       fetch → classify → apply を一括実行（定期実行用）
@@ -42,7 +42,7 @@ def cmd_auth(cfg: Config, _args) -> int:
 def cmd_fetch(cfg: Config, _args) -> int:
     cfg.ensure_dirs()
     service = gmail.get_service(cfg)
-    messages = gmail.fetch_unread_messages(
+    messages = gmail.fetch_inbox_messages(
         service, FETCH_QUERY, MAX_MESSAGES_PER_RUN, BODY_TRUNCATE_CHARS
     )
     inbox = {
@@ -331,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("auth", help="OAuth フローを起動してアカウントのトークンを作る")
-    sub.add_parser("fetch", help="未読メールを取得する")
+    sub.add_parser("fetch", help="受信トレイの未処理メールを取得する")
     sub.add_parser("classify", help="取得済みメールを分類する")
 
     p_apply = sub.add_parser("apply", help="分類結果を Gmail に適用する")

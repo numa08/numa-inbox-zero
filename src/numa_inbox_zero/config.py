@@ -21,9 +21,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # 一度処理したメールに付けるラベル。取得クエリから除外することで再処理を防ぐ。
 PROCESSED_LABEL = "numa-inbox-zero/processed"
 
-# Gmail の検索クエリ。newer_than は初回実行時の暴発防止
-# （これより古い未読は永久にスキャン対象外になる点に注意 — SPEC.md §3）。
-FETCH_QUERY = f"is:unread in:inbox -label:{PROCESSED_LABEL} newer_than:7d"
+# Gmail の検索クエリ。既読/未読は問わない（通知を開いただけで既読になるケースを
+# 取りこぼさないため）。意図的に残すメールはスターで表現する運用とし、-is:starred で除外。
+# newer_than は初回実行時の暴発防止
+# （これより古いメールは永久にスキャン対象外になる点に注意 — SPEC.md §3）。
+FETCH_QUERY = f"in:inbox -is:starred -label:{PROCESSED_LABEL} newer_than:7d"
 
 MAX_MESSAGES_PER_RUN = 50
 

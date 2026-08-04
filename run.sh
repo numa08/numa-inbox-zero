@@ -16,9 +16,17 @@ cd "$(dirname "$(readlink -f "$0")")"
 # タスクスケジューラ経由だとログイン シェルの PATH が乗らないことがある
 export PATH="$HOME/.local/bin:$PATH"
 
+# stdout が tee へのパイプになるため、バッファリングさせると daemon のログが
+# scheduler.log に反映されるまで大きく遅延する
+export PYTHONUNBUFFERED=1
+
 if [[ -f .env.local ]]; then
+  # set -a で export 込みで読み込む。NIZ_ACCOUNTS 等は daemon（Python 側）が
+  # 環境変数として読むため、シェル変数のままでは伝わらない
+  set -a
   # shellcheck disable=SC1091
   source .env.local
+  set +a
 fi
 
 mkdir -p logs

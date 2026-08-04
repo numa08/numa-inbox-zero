@@ -29,6 +29,10 @@ FETCH_QUERY = f"in:inbox -is:starred -label:{PROCESSED_LABEL} newer_than:7d"
 
 MAX_MESSAGES_PER_RUN = 50
 
+# daemon モードのポーリング間隔（秒）。短くするほど受信から処理までの遅延は減るが、
+# メールが 1 通ずつ分類されて claude 起動の固定コストがかさむ。
+DEFAULT_POLL_INTERVAL_SECONDS = 300
+
 # 日本語メールはトークン効率が悪く、長文がコストを支配するため切り詰める。
 BODY_TRUNCATE_CHARS = 2000
 
@@ -39,6 +43,16 @@ DEFAULT_ACCOUNT = "default"
 
 def _state_home() -> Path:
     return Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+
+
+def poll_interval_seconds() -> int:
+    return int(os.environ.get("NIZ_POLL_INTERVAL", DEFAULT_POLL_INTERVAL_SECONDS))
+
+
+def accounts_from_env() -> list[str]:
+    """NIZ_ACCOUNTS（カンマ区切り）を分解する。未設定なら空リスト。"""
+    raw = os.environ.get("NIZ_ACCOUNTS", "")
+    return [a.strip() for a in raw.split(",") if a.strip()]
 
 
 @dataclass

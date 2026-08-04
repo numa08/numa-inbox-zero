@@ -48,11 +48,15 @@ uv run numa-inbox-zero --account personal run
 uv run numa-inbox-zero --account personal fetch      # → work/personal/inbox.json
 uv run numa-inbox-zero --account personal classify   # → work/personal/classification.json
 uv run numa-inbox-zero --account personal apply --dry-run
+
+# 常駐ポーリング（NIZ_ACCOUNTS の全アカウントを 5 分間隔で巡回）
+./run.sh daemon
+./run.sh daemon --interval 60 --dry-run   # 間隔変更・dry-run も可
 ```
 
 `--account` を省略すると `default`（または `NIZ_ACCOUNT` の値）。作業ファイルは `work/<account>/` に分離され、ログは `logs/` に全アカウント共有で `account` フィールド付きで追記される。
 
-## 定期実行（Windows タスクスケジューラ）
+## 定期実行
 
 対象アカウントは `.env.local`（gitignore 対象）に書く。run.sh が起動時に読み込む:
 
@@ -60,6 +64,20 @@ uv run numa-inbox-zero --account personal apply --dry-run
 # .env.local
 NIZ_ACCOUNTS=personal,work,private
 ```
+
+実行形態は 2 つ。受信から処理までの遅延を縮めたいなら常駐ポーリングを使う。
+
+### 常駐ポーリング（daemon）
+
+```bash
+./run.sh daemon
+```
+
+プロセスを立ち上げたまま `NIZ_POLL_INTERVAL`（既定 300 秒）ごとに fetch → classify → apply を全アカウントに対して繰り返す。新着ゼロのサイクルは claude を起動せず、runs.jsonl にも記録しない。API 障害等で 1 サイクルが失敗してもプロセスは死なず、次のポーリングで再試行する。
+
+Windows タスクスケジューラには「ログオン時」トリガーで登録して常駐させる（トリガーの移行手順は追って整備）。
+
+### ワンショット（Windows タスクスケジューラ）
 
 スケジュール（登録済み）:
 
@@ -101,7 +119,8 @@ schtasks.exe /Delete /TN "numa-inbox-zero"   # 削除
 | `NIZ_CREDENTIALS` | `./credentials.json` | OAuth クライアント設定のファイルパス（フォールバック） |
 | `NIZ_TOKEN_DIR` | `~/.local/state/numa-inbox-zero/tokens` | トークンの保存先ディレクトリ |
 | `NIZ_ACCOUNT` | `default` | `--account` の既定値 |
-| `NIZ_ACCOUNTS` | `default` | run.sh が巡回するアカウント（カンマ区切り） |
+| `NIZ_ACCOUNTS` | `default` | run.sh / daemon が巡回するアカウント（カンマ区切り） |
+| `NIZ_POLL_INTERVAL` | `300` | daemon のポーリング間隔（秒） |
 | `NIZ_MODEL` | `sonnet` | 分類に使うモデル |
 | `NIZ_LOG_SUBJECTS` | `1` | `0` で decisions.jsonl に件名を記録しない |
 

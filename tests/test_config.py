@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from numa_inbox_zero.config import Config
+from numa_inbox_zero.config import Config, accounts_from_env, poll_interval_seconds
 
 
 class TestAccountSeparation:
@@ -56,3 +56,21 @@ class TestCredentialsSource:
         monkeypatch.setenv("NIZ_CREDENTIALS", "/secret/place/creds.json")
         cfg = Config()
         assert cfg.credentials_path == Path("/secret/place/creds.json")
+
+
+class TestDaemonSettings:
+    def test_NIZ_ACCOUNTSをカンマ区切りで分解し空白を除去する(self, monkeypatch):
+        monkeypatch.setenv("NIZ_ACCOUNTS", "personal, work ,private")
+        assert accounts_from_env() == ["personal", "work", "private"]
+
+    def test_NIZ_ACCOUNTS未設定なら空リスト(self, monkeypatch):
+        monkeypatch.delenv("NIZ_ACCOUNTS", raising=False)
+        assert accounts_from_env() == []
+
+    def test_ポーリング間隔の既定は300秒(self, monkeypatch):
+        monkeypatch.delenv("NIZ_POLL_INTERVAL", raising=False)
+        assert poll_interval_seconds() == 300
+
+    def test_NIZ_POLL_INTERVALで間隔を変えられる(self, monkeypatch):
+        monkeypatch.setenv("NIZ_POLL_INTERVAL", "60")
+        assert poll_interval_seconds() == 60

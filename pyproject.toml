@@ -1,7 +1,7 @@
 [project]
 name = "numa-inbox-zero"
 version = "0.1.0"
-description = "Gmail の未読メールを Claude で分類してアーカイブ / スター / 返信ドラフト作成を行う個人用ツール"
+description = "Gmail の受信トレイの未処理メールを Claude で分類してアーカイブ / スター / 返信ドラフト作成を行う個人用ツール"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"

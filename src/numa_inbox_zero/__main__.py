@@ -5,7 +5,8 @@
   fetch     受信トレイの未処理メールを取得して work/inbox.json に書く
   classify  work/inbox.json を claude -p で分類し work/classification.json に書く
   apply     分類結果を検証して Gmail に適用する
-  run       fetch → classify → apply を一括実行（定期実行用）
+  run       fetch → classify → apply を一括実行（ワンショット定期実行用）
+  daemon    常駐してポーリング実行（fetch → classify → apply を interval ごと）
 """
 
 from __future__ import annotations
@@ -14,13 +15,22 @@ import argparse
 import json
 import os
 import secrets
+import signal
 import sys
+import time
 from datetime import datetime
 
 from . import classify as classify_mod
 from . import evaluate, gmail
 from .apply import apply_decisions
-from .config import BODY_TRUNCATE_CHARS, FETCH_QUERY, MAX_MESSAGES_PER_RUN, Config
+from .config import (
+    BODY_TRUNCATE_CHARS,
+    FETCH_QUERY,
+    MAX_MESSAGES_PER_RUN,
+    Config,
+    accounts_from_env,
+    poll_interval_seconds,
+)
 from .runlog import append_jsonl, build_decision_record
 from .validate import downgrade_low_confidence, validate_decisions
 
@@ -39,8 +49,8 @@ def cmd_auth(cfg: Config, _args) -> int:
     return 0
 
 
-def cmd_fetch(cfg: Config, _args) -> int:
-    cfg.ensure_dirs()
+def _fetch_inbox(cfg: Config) -> dict:
+    """受信トレイを取得して inbox.json を書き、その内容を返す。"""
     service = gmail.get_service(cfg)
     messages = gmail.fetch_inbox_messages(
         service, FETCH_QUERY, MAX_MESSAGES_PER_RUN, BODY_TRUNCATE_CHARS
@@ -52,7 +62,13 @@ def cmd_fetch(cfg: Config, _args) -> int:
         "messages": messages,
     }
     cfg.inbox_path.write_text(json.dumps(inbox, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"{len(messages)} 件取得 → {cfg.inbox_path}")
+    return inbox
+
+
+def cmd_fetch(cfg: Config, _args) -> int:
+    cfg.ensure_dirs()
+    inbox = _fetch_inbox(cfg)
+    print(f"{len(inbox['messages'])} 件取得 → {cfg.inbox_path}")
     return 0
 
 
@@ -321,6 +337,49 @@ def cmd_run(cfg: Config, args) -> int:
     return cmd_apply(cfg, args)
 
 
+def _daemon_cycle(accounts: list[str], args, config_factory=Config) -> None:
+    """全アカウントを 1 巡する。1 アカウントの失敗で残りを止めない。
+
+    新着ゼロのアカウントは classify / apply に進まない。ポーリングの大半は空振りで、
+    そのたびに claude を起動したり runs.jsonl に空実行を記録するとコストとログが
+    肥大するため。
+    """
+    for account in accounts:
+        cfg = config_factory(account=account)
+        try:
+            cfg.ensure_dirs()
+            inbox = _fetch_inbox(cfg)
+            if not inbox["messages"]:
+                continue
+            print(f"[{_now_iso()}] {account}: {len(inbox['messages'])} 件検出")
+            if cmd_classify(cfg, args) == 0:
+                cmd_apply(cfg, args)
+        except Exception as e:
+            # 常駐プロセスは一時的な API 障害で死なせない。次のポーリングで再試行する。
+            print(f"[{_now_iso()}] {account}: 処理に失敗: {e}", file=sys.stderr)
+
+
+def _raise_keyboard_interrupt(_signum, _frame) -> None:
+    raise KeyboardInterrupt
+
+
+def cmd_daemon(cfg: Config, args) -> int:
+    accounts = accounts_from_env() or [cfg.account]
+    print(
+        f"[{_now_iso()}] daemon 開始: accounts={','.join(accounts)} "
+        f"interval={args.interval}s dry_run={args.dry_run}"
+    )
+    # タスクスケジューラ等からの終了要求（SIGTERM）でも停止ログを残して正常終了する
+    signal.signal(signal.SIGTERM, _raise_keyboard_interrupt)
+    try:
+        while True:
+            _daemon_cycle(accounts, args)
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        print(f"[{_now_iso()}] daemon 停止")
+        return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="numa-inbox-zero")
     parser.add_argument(
@@ -339,6 +398,17 @@ def main(argv: list[str] | None = None) -> int:
 
     p_run = sub.add_parser("run", help="fetch → classify → apply を一括実行")
     p_run.add_argument("--dry-run", action="store_true", help="Gmail への書き込みを行わない")
+
+    p_daemon = sub.add_parser(
+        "daemon", help="常駐してポーリング実行。NIZ_ACCOUNTS の全アカウントを巡回する"
+    )
+    p_daemon.add_argument(
+        "--interval",
+        type=int,
+        default=poll_interval_seconds(),
+        help="ポーリング間隔（秒）。既定は NIZ_POLL_INTERVAL または 300",
+    )
+    p_daemon.add_argument("--dry-run", action="store_true", help="Gmail への書き込みを行わない")
 
     p_eval = sub.add_parser("eval", help="オフライン評価（ゴールデンセットで採点）")
     eval_sub = p_eval.add_subparsers(dest="eval_command", required=True)
@@ -367,6 +437,7 @@ def main(argv: list[str] | None = None) -> int:
         "classify": cmd_classify,
         "apply": cmd_apply,
         "run": cmd_run,
+        "daemon": cmd_daemon,
     }
     return handlers[args.command](cfg, args)
 

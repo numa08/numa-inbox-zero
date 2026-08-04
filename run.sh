@@ -3,6 +3,8 @@
 #
 # - .env.local があれば読み込む（NIZ_ACCOUNTS 等のローカル設定。gitignore 対象）
 # - NIZ_ACCOUNTS（カンマ区切り）の各アカウントを順に処理する。未設定なら "default"。
+# - `run.sh daemon [...]` は常駐ポーリングモード。アカウント巡回は Python 側が
+#   NIZ_ACCOUNTS を読んで行うため、ここでは巡回しない。
 # - .env.op があり op CLI が使えるなら、1Password から NIZ_CREDENTIALS_JSON を注入する。
 #   （定期実行ではトークンリフレッシュに不要だが、あれば通しておく）
 # - 出力は logs/scheduler.log にも追記する。無人実行の失敗を後から追うため。
@@ -26,6 +28,11 @@ echo "--- $(date -Iseconds) run.sh start ---"
 RUNNER=(uv run numa-inbox-zero)
 if [[ -f .env.op ]] && command -v op >/dev/null 2>&1; then
   RUNNER=(op run --env-file=.env.op --no-masking -- uv run numa-inbox-zero)
+fi
+
+if [[ "${1:-}" == "daemon" ]]; then
+  shift
+  exec "${RUNNER[@]}" daemon "$@"
 fi
 
 ACCOUNTS="${NIZ_ACCOUNTS:-default}"

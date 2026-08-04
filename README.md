@@ -65,9 +65,9 @@ uv run numa-inbox-zero --account personal apply --dry-run
 NIZ_ACCOUNTS=personal,work,private
 ```
 
-実行形態は 2 つ。受信から処理までの遅延を縮めたいなら常駐ポーリングを使う。
+実行形態は 2 つ。現在はタスクスケジューラから常駐ポーリング（daemon）を起動する構成で登録している。
 
-### 常駐ポーリング（daemon）
+### 常駐ポーリング（daemon・登録済み）
 
 ```bash
 ./run.sh daemon
@@ -75,17 +75,24 @@ NIZ_ACCOUNTS=personal,work,private
 
 プロセスを立ち上げたまま `NIZ_POLL_INTERVAL`（既定 300 秒）ごとに fetch → classify → apply を全アカウントに対して繰り返す。新着ゼロのサイクルは claude を起動せず、runs.jsonl にも記録しない。API 障害等で 1 サイクルが失敗してもプロセスは死なず、次のポーリングで再試行する。
 
-Windows タスクスケジューラには「ログオン時」トリガーで登録して常駐させる（トリガーの移行手順は追って整備）。
+タスクスケジューラの登録内容:
 
-### ワンショット（Windows タスクスケジューラ）
+- **ログオン時トリガー**で `run.sh daemon` を起動し常駐させる
+- **バックグラウンド実行**（S4U — パスワード保存なし、コンソールウィンドウなし）
+- **実行時間制限なし**（制限があると常駐プロセスが途中で kill される）
+- 異常終了時は 1 分後に再起動（最大 3 回）、多重起動は抑止（`IgnoreNew`）
+- 登録直後やタスク停止後に今すぐ始めるには `schtasks.exe /Run /TN "numa-inbox-zero"`
+- PC のスリープ中・ログオン前は動かない
 
-スケジュール（登録済み）:
+### ワンショット
 
-- **7:00 起点、4時間おき、21:00 まで** → 7:00 / 11:00 / 15:00 / 19:00
-- **深夜 3:00 に 1 回**
-- **ログオンしていなくても実行**（S4U — パスワード保存なし）
-- 時刻を逃した場合（スリープ等）は次に PC が起きたとき実行（`StartWhenAvailable`）
-- 多重起動は抑止（`IgnoreNew`）
+```bash
+./run.sh   # NIZ_ACCOUNTS を 1 巡して終了
+```
+
+時刻トリガーで回していた旧方式。daemon 移行後も手動での単発実行やフォールバックとして残している。
+
+### タスクの登録手順
 
 タスク定義のテンプレートは [task-scheduler.example.xml](task-scheduler.example.xml)。コピーして `UserId`（`DOMAIN\USERNAME` — `whoami.exe` の出力）とリポジトリのパスを自分の環境に書き換える:
 
@@ -109,7 +116,7 @@ schtasks.exe /Delete /TN "numa-inbox-zero"   # 削除
 ```
 
 - 実行ログは `logs/scheduler.log` に追記される
-- run.sh は各アカウントを順に処理し、1 アカウントの失敗で残りを止めない（失敗があれば終了コード非ゼロ）
+- 1 アカウントの失敗で残りを止めない（daemon は次のポーリングで再試行、ワンショットは失敗があれば終了コード非ゼロ）
 
 ## 設定（環境変数）
 

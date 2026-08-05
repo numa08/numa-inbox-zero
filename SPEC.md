@@ -60,7 +60,7 @@ in:inbox -is:starred -label:numa-inbox-zero/processed newer_than:7d
 ```
 
 - 既読/未読は問わない。通知を開いただけで既読になったメール（読む意図はなかったが既読が付いたケース）を取りこぼさないため。再処理防止は `is:unread` ではなく processed ラベルが担うので、既読を含めても二重処理は起きない。
-- `-is:starred` により、手動でスターを付けたメールは対象外になる。「意図的に受信トレイに残す」という意思表示はスターで行う運用。ツール自身が star / reply で付けたスターも一致するが、これらは processed ラベルでも既に除外されている。
+- `-is:starred` により、手動でスターを付けたメールは対象外になる。「自分で対応を管理する（ピン止めに置く）」という意思表示はスターで行う運用。ツール自身が star / reply で付けたスターも一致するが、これらは processed ラベルでも既に除外されている。
 - `-label:numa-inbox-zero/processed` により、一度処理したメールは次回以降スキップされる。処理済みメールが毎回再分類されてドラフトが増殖する問題を構造的に防ぐ。
 - `newer_than:7d` は初回実行時の暴発防止。定常運転（30件/日）では実質無効。
 - 1回あたりの上限 `MAX_MESSAGES_PER_RUN = 50`。超過分は次回に回す。
@@ -191,8 +191,10 @@ claude -p \
 | action | Gmail API 操作 |
 |---|---|
 | `archive` | `users.messages.modify` — `removeLabelIds: ["INBOX"]`, `addLabelIds: ["numa-inbox-zero/processed"]` |
-| `star` | `users.messages.modify` — `addLabelIds: ["STARRED", "numa-inbox-zero/processed"]` |
-| `reply` | ① `users.messages.modify`（`STARRED` + `processed` 付与）→ ② `users.drafts.create` |
+| `star` | `users.messages.modify` — `removeLabelIds: ["INBOX"]`, `addLabelIds: ["STARRED", "numa-inbox-zero/processed"]` |
+| `reply` | ① `users.messages.modify`（`STARRED` + `processed` 付与、`INBOX` 除去）→ ② `users.drafts.create` |
+
+**star / reply も受信トレイからアーカイブする。** スター付きメールは受信トレイになくても「ピン止め」（スター付き一覧）に表示されるため、人の対応待ちキューはピン止めが担い、受信トレイは常に空に保つ。対応が済んだらスターを外すだけでよい（processed ラベル済みなので再取得されない）。
 
 いずれも `UNREAD` は外さない。「自分がまだ見ていない」という情報を壊さないため。
 

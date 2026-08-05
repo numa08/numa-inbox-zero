@@ -68,7 +68,7 @@ def downgrade_low_confidence(decisions: list[dict]) -> tuple[list[dict], int]:
     それ以外（low・欠損・不正値）は star に降格して人間の判断を仰ぐ。
     プロンプトの指示が無視されてもコード側で安全に倒れる、という二重化。
 
-    star / reply の迷いは受信トレイに残るため降格しない。
+    star / reply の迷いはスター付き一覧（ピン止め）で人の目に触れるため降格しない。
     戻り値は (変換後の decisions, 降格した件数)。
     """
     transformed: list[dict] = []

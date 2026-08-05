@@ -50,14 +50,24 @@ class TestApplyActions:
         assert kwargs["add"] == ["Label_1"]
         assert kwargs["remove"] == ["INBOX"]
 
-    def test_starはSTARREDとprocessedを付けINBOXに残す(self):
+    def test_starはSTARREDとprocessedを付けINBOXから外す(self):
         summary, mock_modify, _ = _run(
             [{"message_id": "m1", "action": "star", "reason": "r"}], [_message()]
         )
         assert summary.starred == 1
         _, kwargs = mock_modify.call_args
         assert kwargs["add"] == ["STARRED", "Label_1"]
-        assert kwargs["remove"] == []
+        assert kwargs["remove"] == ["INBOX"]
+
+    def test_replyのラベル付与でもINBOXから外す(self):
+        summary, mock_modify, _ = _run(
+            [{"message_id": "m1", "action": "reply", "reason": "r", "draft_body": "承知"}],
+            [_message()],
+        )
+        assert summary.drafted == 1
+        _, kwargs = mock_modify.call_args
+        assert kwargs["add"] == ["STARRED", "Label_1"]
+        assert kwargs["remove"] == ["INBOX"]
 
     def test_replyはラベル付与のあとにドラフト作成(self):
         call_order = []

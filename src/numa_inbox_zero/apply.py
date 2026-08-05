@@ -92,12 +92,19 @@ def _apply_one(service, *, decision: dict, message: dict, processed_label_id: st
             gmail.modify_labels(service, message_id, add=[processed_label_id], remove=["INBOX"])
             return ApplyRecord(message_id, action, "ok")
 
+        # star / reply もアーカイブする。スター付きメールは受信トレイになくても
+        # 「ピン止め」（スター付き一覧）に表示され、人の対応待ちはそちらが担うため、
+        # 受信トレイは常に空に保つ
         if action == "star":
-            gmail.modify_labels(service, message_id, add=["STARRED", processed_label_id], remove=[])
+            gmail.modify_labels(
+                service, message_id, add=["STARRED", processed_label_id], remove=["INBOX"]
+            )
             return ApplyRecord(message_id, action, "ok")
 
         # reply: ラベル先行（モジュール docstring 参照）
-        gmail.modify_labels(service, message_id, add=["STARRED", processed_label_id], remove=[])
+        gmail.modify_labels(
+            service, message_id, add=["STARRED", processed_label_id], remove=["INBOX"]
+        )
     except HttpError as e:
         return ApplyRecord(message_id, action, "failed", f"ラベル付与に失敗: {e}")
 

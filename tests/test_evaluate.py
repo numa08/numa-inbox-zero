@@ -12,6 +12,7 @@ from numa_inbox_zero.evaluate import (
     import_candidates,
     load_golden,
     score_predictions,
+    select_import_targets,
     split_labeled,
 )
 
@@ -56,6 +57,72 @@ class TestSplitLabeled:
         labeled, unlabeled = split_labeled(entries)
         assert [e["message"]["message_id"] for e in labeled] == ["m1"]
         assert unlabeled == 2
+
+    def test_nullはsystem_actionへの同意として正解に採用される(self):
+        """誤判定だけ上書きする運用。null + 有効な system_action は同意扱い。"""
+        entries = [{**_golden("m1", None), "system_action": "archive"}]
+        labeled, unlabeled = split_labeled(entries)
+        assert labeled[0]["expected_action"] == "archive"
+        assert unlabeled == 0
+
+    def test_明示したexpected_actionはsystem_actionより優先される(self):
+        entries = [{**_golden("m1", "star"), "system_action": "archive"}]
+        labeled, _ = split_labeled(entries)
+        assert labeled[0]["expected_action"] == "star"
+
+    def test_nullでsystem_actionも無効なら未ラベル扱い(self):
+        entries = [
+            {**_golden("m1", None), "system_action": None},
+            {**_golden("m2", None), "system_action": "send"},  # enum 外
+            _golden("m3", None),  # system_action キー自体が無い
+        ]
+        labeled, unlabeled = split_labeled(entries)
+        assert labeled == []
+        assert unlabeled == 3
+
+    def test_enum外のexpected_actionはsystem_actionにフォールバックしない(self):
+        """タイポ（例: achive）を黙って同意扱いにすると誤ラベルが混入するため。"""
+        entries = [{**_golden("m1", "achive"), "system_action": "archive"}]
+        labeled, unlabeled = split_labeled(entries)
+        assert labeled == []
+        assert unlabeled == 1
+
+    def test_正規化はコピーに対して行われ元のエントリを変更しない(self):
+        entry = {**_golden("m1", None), "system_action": "archive"}
+        split_labeled([entry])
+        assert entry["expected_action"] is None
+
+
+class TestSelectImportTargets:
+    def _log(self, message_id, account="personal", applied="ok", action="archive"):
+        return {
+            "account": account,
+            "message_id": message_id,
+            "action": action,
+            "applied": applied,
+        }
+
+    def test_指定アカウントの判定だけが対象になる(self):
+        decisions = [self._log("m1"), self._log("m2", account="work")]
+        targets = select_import_targets(decisions, account="personal")
+        assert [t["message_id"] for t in targets] == ["m1"]
+
+    def test_rejectedの判定は除外される(self):
+        """検証で弾かれた行の message_id は捏造の可能性があり、Gmail 照会に回さない。"""
+        decisions = [self._log("m1"), self._log("m2", applied="rejected")]
+        targets = select_import_targets(decisions, account="personal")
+        assert [t["message_id"] for t in targets] == ["m1"]
+
+    def test_同じメールが複数回分類されていたら最新の判定を採用する(self):
+        decisions = [self._log("m1", action="archive"), self._log("m1", action="star")]
+        targets = select_import_targets(decisions, account="personal")
+        assert len(targets) == 1
+        assert targets[0]["action"] == "star"
+
+    def test_message_idが欠けた行は無視される(self):
+        decisions = [self._log(None), self._log("m1")]
+        targets = select_import_targets(decisions, account="personal")
+        assert [t["message_id"] for t in targets] == ["m1"]
 
 
 class TestImportCandidates:

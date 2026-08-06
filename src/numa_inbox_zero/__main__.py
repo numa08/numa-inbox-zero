@@ -31,7 +31,7 @@ from .config import (
     accounts_from_env,
     poll_interval_seconds,
 )
-from .runlog import append_jsonl, build_decision_record
+from .runlog import append_jsonl, build_decision_record, load_jsonl
 from .validate import downgrade_low_confidence, validate_decisions
 
 
@@ -219,39 +219,55 @@ def _log_run_error(cfg: Config, inbox: dict, started_at: str, message: str) -> N
 
 
 def cmd_eval_import(cfg: Config, _args) -> int:
-    """直近の実行分をゴールデンセット候補として取り込む。
+    """実行ログの判定をゴールデンセット候補として取り込む。
 
-    expected_action は空で追記される。人間が golden.jsonl を開いて
-    正解を埋める（システムの判定に同意なら system_action を写す）。
+    本文・件名の全文はログに残さない方針（SPEC §6）のため、実行ログ
+    （decisions.jsonl）の message_id をもとに Gmail API から本文を再取得し
+    （読み取りのみ）、ログに残る判定（action / reason）と合成する。
     """
-    if not cfg.inbox_path.exists():
-        print(f"取り込み元がない: {cfg.inbox_path}（先に fetch を実行）", file=sys.stderr)
+    decisions = load_jsonl(cfg.decisions_log_path)
+    targets = evaluate.select_import_targets(decisions, account=cfg.account)
+    if not targets:
+        print(
+            f"取り込み対象がない: {cfg.decisions_log_path} に "
+            f"account={cfg.account} の判定がない（--account の指定を確認）",
+            file=sys.stderr,
+        )
         return 1
-    inbox = json.loads(cfg.inbox_path.read_text(encoding="utf-8"))
-    decisions = []
-    if cfg.classification_path.exists():
-        classification = json.loads(cfg.classification_path.read_text(encoding="utf-8"))
-        decisions = classification.get("decisions", [])
 
     existing = evaluate.load_golden(cfg.golden_path)
     existing_ids = {str(e["message"]["message_id"]) for e in existing}
+    new_targets = [t for t in targets if str(t["message_id"]) not in existing_ids]
+
+    messages: list[dict] = []
+    missing: list[str] = []
+    if new_targets:
+        service = gmail.get_service(cfg)
+        messages, missing = gmail.fetch_messages_by_ids(
+            service, [str(t["message_id"]) for t in new_targets], BODY_TRUNCATE_CHARS
+        )
+
     candidates = evaluate.import_candidates(
-        messages=inbox["messages"],
-        decisions=decisions,
+        messages=messages,
+        decisions=new_targets,
         existing_ids=existing_ids,
         imported_at=_now_iso(),
+        note=f"account={cfg.account}",
     )
-
     cfg.eval_dir.mkdir(parents=True, exist_ok=True)
     for candidate in candidates:
         append_jsonl(cfg.golden_path, candidate)
 
-    labeled, unlabeled = evaluate.split_labeled(existing)
-    print(
-        f"{len(candidates)} 件を候補として追記 → {cfg.golden_path}\n"
-        f"現在: ラベル済み {len(labeled)} 件 / 未ラベル {unlabeled + len(candidates)} 件。"
-        f"expected_action を埋めてください。"
+    labeled, unlabeled = evaluate.split_labeled(existing + candidates)
+    lines = [f"{len(candidates)} 件を候補として追記 → {cfg.golden_path}"]
+    if missing:
+        lines.append(f"取得できなかったメール {len(missing)} 件（削除済み等）: {missing}")
+    lines.append(
+        f"現在: ラベル済み {len(labeled)} 件 / 未ラベル {unlabeled} 件。\n"
+        f"全件レビューし、誤判定だけ expected_action を上書きしてください"
+        f"（null のままの行は system_action に同意として採点される）。"
     )
+    print("\n".join(lines))
     return 0
 
 
@@ -321,9 +337,9 @@ def cmd_eval_diff(cfg: Config, args) -> int:
             return 1
         results.append(json.loads(path.read_text(encoding="utf-8")))
 
-    golden_by_id = {
-        str(e["message"]["message_id"]): e for e in evaluate.load_golden(cfg.golden_path)
-    }
+    # null（system_action に同意）を正解として表示するため、正規化済みエントリを引く
+    labeled, _ = evaluate.split_labeled(evaluate.load_golden(cfg.golden_path))
+    golden_by_id = {str(e["message"]["message_id"]): e for e in labeled}
     diff = evaluate.diff_results(results[0], results[1], golden_by_id)
     print(evaluate.format_diff(diff))
     return 0

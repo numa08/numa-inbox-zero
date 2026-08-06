@@ -43,37 +43,86 @@ def _outcome(decisions, cost=0.05):
     )
 
 
+def _write_decisions(cfg: Config, records):
+    cfg.decisions_log_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.decisions_log_path.write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records),
+        encoding="utf-8",
+    )
+
+
+def _decision_log(message_id, action="archive", account="default", applied="ok"):
+    return {
+        "run_id": "r1",
+        "account": account,
+        "message_id": message_id,
+        "action": action,
+        "reason": "通知",
+        "applied": applied,
+    }
+
+
 class TestEvalImport:
-    def test_inboxとclassificationから候補を追記する(self, tmp_path):
+    def test_実行ログとgmail取得の合成で候補を追記する(self, tmp_path):
         cfg = _make_config(tmp_path)
-        cfg.inbox_path.write_text(
-            json.dumps(
-                {
-                    "run_id": "r1",
-                    "messages": [{"message_id": "m1", "subject": "s", "body": "b"}],
-                }
-            ),
-            encoding="utf-8",
-        )
-        cfg.classification_path.write_text(
-            json.dumps(
-                {"decisions": [{"message_id": "m1", "action": "archive", "reason": "通知"}]}
-            ),
-            encoding="utf-8",
-        )
+        _write_decisions(cfg, [_decision_log("m1")])
 
-        assert cmd_eval_import(cfg, argparse.Namespace()) == 0
+        with (
+            patch("numa_inbox_zero.__main__.gmail.get_service") as mock_service,
+            patch(
+                "numa_inbox_zero.__main__.gmail.fetch_messages_by_ids",
+                return_value=([{"message_id": "m1", "subject": "s", "body": "b"}], []),
+            ) as mock_fetch,
+        ):
+            assert cmd_eval_import(cfg, argparse.Namespace()) == 0
 
-        lines = cfg.golden_path.read_text(encoding="utf-8").splitlines()
-        entry = json.loads(lines[0])
+        # ログ由来の message_id が Gmail 照会に渡っている
+        assert mock_fetch.call_args.args[1] == ["m1"]
+        mock_service.assert_called_once()
+
+        entry = json.loads(cfg.golden_path.read_text(encoding="utf-8").splitlines()[0])
         assert entry["expected_action"] is None
         assert entry["system_action"] == "archive"
+        assert entry["system_reason"] == "通知"
+        assert entry["message"]["body"] == "b"
+        assert entry["note"] == "account=default"
 
-        # 再実行しても同じメールは二重取り込みされない
-        assert cmd_eval_import(cfg, argparse.Namespace()) == 0
+    def test_取り込み済みメールはgmailに照会せず二重取り込みしない(self, tmp_path):
+        cfg = _make_config(tmp_path)
+        _write_decisions(cfg, [_decision_log("m1")])
+        _write_golden(cfg, [_golden("m1", None)])
+
+        with patch("numa_inbox_zero.__main__.gmail.get_service") as mock_service:
+            assert cmd_eval_import(cfg, argparse.Namespace()) == 0
+
+        mock_service.assert_not_called()
         assert len(cfg.golden_path.read_text(encoding="utf-8").splitlines()) == 1
 
-    def test_inboxがなければエラー終了(self, tmp_path):
+    def test_取得できなかったメールは候補に含めず正常終了する(self, tmp_path):
+        cfg = _make_config(tmp_path)
+        _write_decisions(cfg, [_decision_log("m1"), _decision_log("m2")])
+
+        with (
+            patch("numa_inbox_zero.__main__.gmail.get_service"),
+            patch(
+                "numa_inbox_zero.__main__.gmail.fetch_messages_by_ids",
+                return_value=([{"message_id": "m1", "subject": "s", "body": "b"}], ["m2"]),
+            ),
+        ):
+            assert cmd_eval_import(cfg, argparse.Namespace()) == 0
+
+        lines = cfg.golden_path.read_text(encoding="utf-8").splitlines()
+        assert [json.loads(line)["message"]["message_id"] for line in lines] == ["m1"]
+
+    def test_対象アカウントの判定がなければgmailに触れずエラー終了(self, tmp_path):
+        cfg = _make_config(tmp_path)
+        _write_decisions(cfg, [_decision_log("m1", account="other")])
+
+        with patch("numa_inbox_zero.__main__.gmail.get_service") as mock_service:
+            assert cmd_eval_import(cfg, argparse.Namespace()) == 1
+        mock_service.assert_not_called()
+
+    def test_ログ自体がなければエラー終了(self, tmp_path):
         cfg = _make_config(tmp_path)
         assert cmd_eval_import(cfg, argparse.Namespace()) == 1
 

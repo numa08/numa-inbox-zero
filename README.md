@@ -148,9 +148,11 @@ duckdb -c "SELECT account, sum(classify.total_cost_usd) FROM 'logs/runs.jsonl' G
 モデル・プロンプト変更の良し悪しを、本番を触らずにゴールデンセットで測る。運用ルールと実験ログは [eval/README.md](eval/README.md)。
 
 ```bash
-# ① 直近の実行分をゴールデンセット候補として取り込む
+# ① 実行ログ（decisions.jsonl）の判定をゴールデンセット候補として取り込む
+#   （本文・件名はログに残らないため Gmail API から再取得して合成する）
 uv run numa-inbox-zero --account personal eval import
-# → eval/golden.jsonl の expected_action を自分で埋める（正解ラベル付け）
+# → eval/golden.jsonl を全件レビューし、誤判定だけ expected_action を上書きする
+#   （null のままの行は system_action に同意として採点される）
 
 # ② ベースラインを測る
 uv run numa-inbox-zero eval run --name baseline-sonnet

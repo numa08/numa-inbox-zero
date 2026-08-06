@@ -13,6 +13,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from .config import GMAIL_SCOPES, PROCESSED_LABEL, Config
 from .mail import (
@@ -124,6 +125,31 @@ def fetch_inbox_messages(service, query: str, max_results: int, body_limit: int)
         raw = service.users().messages().get(userId="me", id=ref["id"], format="full").execute()
         messages.append(_shape_message(raw, body_limit))
     return messages
+
+
+def fetch_messages_by_ids(
+    service, message_ids: list[str], body_limit: int
+) -> tuple[list[dict], list[str]]:
+    """message_id 指定でメールを取得し、分類器に渡す形へ整形する。
+
+    アーカイブ済み・受信トレイ外のメールも取得できる。eval import が
+    実行ログから過去のメールを復元するために使う（読み取りのみ）。
+    削除済み等で見つからない ID は missing として返し、呼び出し側が報告する。
+    """
+    messages = []
+    missing = []
+    for message_id in message_ids:
+        try:
+            raw = (
+                service.users().messages().get(userId="me", id=message_id, format="full").execute()
+            )
+        except HttpError as e:
+            if e.resp.status == 404:
+                missing.append(message_id)
+                continue
+            raise
+        messages.append(_shape_message(raw, body_limit))
+    return messages, missing
 
 
 def _shape_message(raw: dict, body_limit: int) -> dict:

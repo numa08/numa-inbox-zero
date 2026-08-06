@@ -16,6 +16,25 @@ def append_jsonl(path: Path, record: dict) -> None:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def load_jsonl(path: Path) -> list[dict]:
+    """JSONL ログを読む。ファイルが無ければ空リスト。
+
+    自前で追記したログが前提だが、壊れた行は行番号付きで報告し、
+    黙って読み飛ばさない（欠損に気づけるように）。
+    """
+    if not path.exists():
+        return []
+    records = []
+    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{path}:{line_no} が JSON としてパースできない: {e}") from e
+    return records
+
+
 def build_decision_record(
     *,
     run_id: str,

@@ -394,3 +394,39 @@ numa-inbox-zero/
 
 - `gmail.py` を書く前に Context7 で `google-api-python-client` のドキュメントを確認すること。特に `users.drafts.create` のリクエストボディは `{"message": {"raw": ..., "threadId": ...}}` と `message` の下にネストする形で、`threadId` を draft 直下に置く誤りが多い。§5 の記述は正しいはずだが、実装前に裏を取る。
 - `claude -p` の JSON 出力フィールド名（`usage` / `total_cost_usd` / `modelUsage`）は CLI のバージョンに依存する。パース時に欠損を許容し、`runs.jsonl` には取れたものだけ書く。`cli_version` を必ず記録しておけば、後からフィールド構造の差異を追える。
+
+## 12. オフライン評価（eval）
+
+モデル・ポリシー・プロンプトの変更を本番投入前にゴールデンセットで採点する。運用ルール（1実験1変数・合否ゲート・実験ログ）は [eval/README.md](eval/README.md)。
+
+### ゴールデンセット（eval/golden.jsonl）
+
+1 行 = 1 メール。`message`（本文含む）・`expected_action`（正解ラベル）・`system_action` / `system_reason`（運用時の判定）を持つ。
+
+- **追記のみ**。ラベル付け以外で過去のエントリを書き換えない（実験の比較可能性を保つ）
+- ラベル付けは「誤判定だけ `expected_action` を上書きする」方式。**null は `system_action` への同意**として採点される
+- 本文を含むため gitignore。リポジトリには入れない
+
+### eval import — 実行ログからの収集
+
+取り込み元は `logs/decisions.jsonl`（実行ログ）。work/ の inbox.json は取り込み元に**しない** — daemon 運用ではサイクルごとに上書きされ、メールを処理し切った直後は常に空であり、スナップショットとして残らないため。
+
+```
+decisions.jsonl ─┬─ account でフィルタ
+                 ├─ applied == "rejected" を除外（捏造 message_id の可能性があるため Gmail 照会に回さない）
+                 ├─ message_id ごとに最新の判定を採用（同じメールが複数回分類されうる）
+                 ├─ 既に golden.jsonl にある message_id を除外（追記のみの原則）
+                 ▼
+Gmail users.messages.get ─ 本文・件名・ヘッダを再取得（読み取りのみ。削除済みメールは 404 → スキップして件数報告）
+                 ▼
+合成して golden.jsonl へ追記 ─ ログの action / reason を system_action / system_reason として保持
+```
+
+ログには from_domain・件名・本文文字数しか残さない方針（§6）のため、本文・宛先等は Gmail API からオンデマンドで復元する。「ログに個人情報を残さない」と「評価には本文が要る」を両立させる構造であり、ログ側に本文を記録する変更でこれを崩さない。
+
+### eval run / diff
+
+- `eval run --name <実験名>`: ラベル済みエントリ全件を 1 バッチで分類し、`eval/results/<name>.json` に採点結果（メトリクス・混同行列・per-message 予測）を保存する
+- `eval diff <a> <b>`: メトリクス差分と「判定が変わった件」を表示。合否は集計スコアでなく差分の中身で判断する
+- 主要メトリクスは `archive_precision`（低下不可）と `reply_recall`（-0.03 まで許容）。誤りコストが非対称（false archive が最も痛い）なため accuracy は参考値
+- 本番 daemon はメールをほぼ 1 件ずつ分類するのに対し、eval は全件 1 バッチで分類する。この挙動差により eval の絶対値は本番と一致しない。実験同士の比較（同一条件）にのみ使う

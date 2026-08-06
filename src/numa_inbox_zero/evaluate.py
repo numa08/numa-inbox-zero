@@ -39,9 +39,44 @@ def load_golden(path: Path) -> list[dict]:
 
 
 def split_labeled(entries: list[dict]) -> tuple[list[dict], int]:
-    """ラベル済みエントリと、未ラベル（expected_action が空）の件数を返す。"""
-    labeled = [e for e in entries if e.get("expected_action") in VALID_ACTIONS]
+    """ラベル済みエントリと、未ラベルの件数を返す。
+
+    ラベル付けは「誤判定だけ expected_action を上書きする」運用。
+    expected_action が null の行は system_action への同意とみなし、
+    system_action を正解として採用する（採点・golden_hash が一貫するよう
+    正規化したコピーを返す）。明示された expected_action が enum 外の場合は
+    タイポの可能性があるため、system_action に黙ってフォールバックせず
+    未ラベル扱いにする。
+    """
+    labeled = []
+    for entry in entries:
+        expected = entry.get("expected_action")
+        if expected is None and entry.get("system_action") in VALID_ACTIONS:
+            expected = entry["system_action"]
+        if expected in VALID_ACTIONS:
+            labeled.append({**entry, "expected_action": expected})
     return labeled, len(entries) - len(labeled)
+
+
+def select_import_targets(decisions: list[dict], *, account: str) -> list[dict]:
+    """実行ログ（decisions.jsonl）からゴールデンセット候補の元になる判定を選ぶ。
+
+    - 指定アカウントの判定だけを対象にする（Gmail の照会先が account ごとに違うため）
+    - applied == "rejected" は除外する。検証で弾かれた行の message_id は
+      分類器出力由来で捏造の可能性があり、Gmail への照会に回さない
+    - 同じメールが複数回分類されている場合は最新（ログ末尾側）の判定を採用する
+    """
+    latest: dict[str, dict] = {}
+    for decision in decisions:
+        if decision.get("account") != account:
+            continue
+        if decision.get("applied") == "rejected":
+            continue
+        message_id = decision.get("message_id")
+        if not message_id:
+            continue
+        latest[str(message_id)] = decision
+    return list(latest.values())
 
 
 def import_candidates(
@@ -50,11 +85,13 @@ def import_candidates(
     decisions: list[dict],
     existing_ids: set[str],
     imported_at: str,
+    note: str = "",
 ) -> list[dict]:
-    """運用データからゴールデンセット候補を作る。
+    """メール本体と判定ログを合成してゴールデンセット候補を作る。
 
-    expected_action は空（人間が後で埋める）。システムの判定は
-    system_action として残し、同意ならそのまま写せるようにする。
+    expected_action は空で追記し、人間がレビューして誤判定だけ上書きする。
+    null のままの行は system_action への同意として採点される（split_labeled）ため、
+    取り込んだ直後に必ず全件レビューすること。
     既にゴールデンセットにあるメールは取り込まない（追記のみ・書き換えない原則）。
     """
     decisions_by_id = {d.get("message_id"): d for d in decisions}
@@ -70,7 +107,7 @@ def import_candidates(
                 "expected_action": None,
                 "system_action": decision.get("action"),
                 "system_reason": decision.get("reason"),
-                "note": "",
+                "note": note,
                 "imported_at": imported_at,
             }
         )

@@ -2,8 +2,27 @@
 
 import json
 
+import pytest
+
 from numa_inbox_zero.apply import ApplyRecord
-from numa_inbox_zero.runlog import append_jsonl, build_decision_record
+from numa_inbox_zero.runlog import append_jsonl, build_decision_record, load_jsonl
+
+
+class TestLoadJsonl:
+    def test_追記した内容がそのまま読み戻せる(self, tmp_path):
+        path = tmp_path / "d.jsonl"
+        append_jsonl(path, {"a": 1})
+        append_jsonl(path, {"b": "日本語"})
+        assert load_jsonl(path) == [{"a": 1}, {"b": "日本語"}]
+
+    def test_存在しないファイルは空リスト(self, tmp_path):
+        assert load_jsonl(tmp_path / "none.jsonl") == []
+
+    def test_壊れた行は行番号付きでエラー(self, tmp_path):
+        path = tmp_path / "d.jsonl"
+        path.write_text('{"ok": 1}\n{broken\n', encoding="utf-8")
+        with pytest.raises(ValueError, match=":2"):
+            load_jsonl(path)
 
 
 class TestAppendJsonl:

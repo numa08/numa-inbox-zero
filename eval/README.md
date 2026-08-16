@@ -25,3 +25,6 @@
 | 2026-08-06 | haiku45-policy-v2 | モデル: sonnet → haiku 4.5 | 0.9355 | -（reply 0 件） | $0.36 | 保留（ゲートは通るが配送通知・領収書の過剰 star が約+10件/80、判定欠落1件。コスト1/3は魅力、ピン止めのノイズ次第） |
 | 2026-08-06 | opus5-policy-v2 | モデル: sonnet → opus 5 | 0.9302 | -（reply 0 件） | $1.39 | 不採用（accuracy 同値・変化4件のみでコスト+38%に見合わない） |
 | 2026-08-06 | policy-v3-delivery | policy.md: 配送状況通知（ヤマト等）を archive に明記。golden はヤマト1件のラベル修正あり（star→archive） | 0.9556 | -（reply 0 件） | $1.03 | 採用（accuracy 0.90、注文確認・領収書の過剰 star も解消。Render 通知 2 件が star に揺れた点は次回観察） |
+| 2026-08-06 | haiku45-policy-v3 | モデル: sonnet → haiku 4.5（policy v3） | 0.8269 | -（reply 0 件） | $0.33 | 不採用（取引通知・削除通知の誤 archive 9 件。本文が HTML 代替文のみのメールを字義どおり読んで誤判定する癖を確認） |
+| 2026-08-06 | haiku45-policy-v4 | policy.md: 本文不全時は件名で判断・削除予告も star を追記（haiku で測定） | 0.9070 | -（reply 0 件） | $0.35 | 不採用（危険側 9→4 件まで改善したがゲート未達。削除完了通知を「対応不要」と archive する癖が policy の明記でも直らず） |
+| 2026-08-06 | sonnet-policy-v4 | 同 policy v4 を sonnet で測定 | 0.9286 | -（reply 0 件） | $1.01 | 不採用・v3 に戻す（OTP 通知の archive/missing 化、領収書の過剰 star 再発。「件名で star」例示が star バイアスとして作用） |

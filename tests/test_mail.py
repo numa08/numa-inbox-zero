@@ -51,24 +51,26 @@ class TestExtractBody:
         payload = {"mimeType": "text/plain", "body": {"data": _b64url("本文です")}}
         assert extract_body(payload) == "本文です"
 
-    def test_multipartではtext_plainを優先する(self):
-        payload = {
-            "mimeType": "multipart/alternative",
-            "parts": [
-                {"mimeType": "text/html", "body": {"data": _b64url("<p>HTML</p>")}},
-                {"mimeType": "text/plain", "body": {"data": _b64url("PLAIN")}},
-            ],
-        }
-        assert extract_body(payload) == "PLAIN"
-
-    def test_text_plainがなければHTMLをタグ除去して使う(self):
+    def test_multipartではhtmlをタグ除去して優先する(self):
+        """text/plain が「HTML メールをご覧いただけません」等の代替文のみで
+        実内容を含まないメールがあるため、実内容が入っている HTML 側を正とする。"""
         payload = {
             "mimeType": "multipart/alternative",
             "parts": [
                 {"mimeType": "text/html", "body": {"data": _b64url("<p>HTML本文</p>")}},
+                {"mimeType": "text/plain", "body": {"data": _b64url("代替文のみ")}},
             ],
         }
         assert extract_body(payload) == "HTML本文"
+
+    def test_htmlがなければtext_plainを使う(self):
+        payload = {
+            "mimeType": "multipart/alternative",
+            "parts": [
+                {"mimeType": "text/plain", "body": {"data": _b64url("PLAIN")}},
+            ],
+        }
+        assert extract_body(payload) == "PLAIN"
 
     def test_ネストしたmultipartを探索する(self):
         payload = {

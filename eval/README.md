@@ -28,3 +28,5 @@
 | 2026-08-06 | haiku45-policy-v3 | モデル: sonnet → haiku 4.5（policy v3） | 0.8269 | -（reply 0 件） | $0.33 | 不採用（取引通知・削除通知の誤 archive 9 件。本文が HTML 代替文のみのメールを字義どおり読んで誤判定する癖を確認） |
 | 2026-08-06 | haiku45-policy-v4 | policy.md: 本文不全時は件名で判断・削除予告も star を追記（haiku で測定） | 0.9070 | -（reply 0 件） | $0.35 | 不採用（危険側 9→4 件まで改善したがゲート未達。削除完了通知を「対応不要」と archive する癖が policy の明記でも直らず） |
 | 2026-08-06 | sonnet-policy-v4 | 同 policy v4 を sonnet で測定 | 0.9286 | -（reply 0 件） | $1.01 | 不採用・v3 に戻す（OTP 通知の archive/missing 化、領収書の過剰 star 再発。「件名で star」例示が star バイアスとして作用） |
+| 2026-08-06 | sonnet-v3-htmlbody | mail.py: 本文抽出を text/html 優先に変更（golden の本文 52 件を再取得。policy は v3 のまま） | 0.9556 | -（reply 0 件） | $0.99 | 採用（sonnet は完全に無風。切り詰め対象 23→15 件でコスト微減） |
+| 2026-08-06 | haiku45-v3-htmlbody | 同抽出変更を haiku で測定 | 0.9070 | -（reply 0 件） | $0.35 | haiku 移行は引き続き見送り（policy を汚さず 0.8269→0.9070 まで改善。残る危険側 4 件は golden のラベルノイズ含みで、次バッチのラベル整理後に再判定） |

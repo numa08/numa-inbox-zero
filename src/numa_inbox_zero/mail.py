@@ -42,15 +42,17 @@ def html_to_text(html_body: str) -> str:
 def extract_body(payload: dict) -> str:
     """Gmail の payload ツリーから本文テキストを取り出す。
 
-    text/plain を優先し、なければ text/html をタグ除去して使う。
-    multipart はネストするため再帰的に探索する。
+    text/html をタグ除去したものを優先し、なければ text/plain を使う。
+    HTML メールの text/plain パートは「HTML メールをご覧いただけません」等の
+    代替文だけで実内容（取引金額等）を含まないことがあり、分類器が
+    誤判定する原因になるため。multipart はネストするため再帰的に探索する。
     """
-    plain = _find_part(payload, "text/plain")
-    if plain is not None:
-        return plain
     html_part = _find_part(payload, "text/html")
     if html_part is not None:
         return html_to_text(html_part)
+    plain = _find_part(payload, "text/plain")
+    if plain is not None:
+        return plain
     return ""
 
 

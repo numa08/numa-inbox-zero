@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -72,11 +73,28 @@ def get_credentials(cfg: Config) -> Credentials:
     if creds and creds.valid:
         return creds
     if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-    else:
+        try:
+            creds.refresh(Request())
+        except RefreshError:
+            # リフレッシュトークン自体が失効・取り消し済み（invalid_grant）。
+            # OAuth 同意画面が「テスト」ステータスだと 7 日で失効する。
+            # 保存済みトークンは使いものにならないので破棄してフローをやり直す。
+            creds = None
+    if creds is None or not creds.valid:
         client_config = load_client_config(cfg.credentials_json, cfg.credentials_path)
         flow = InstalledAppFlow.from_client_config(client_config, GMAIL_SCOPES)
-        creds = flow.run_local_server(port=0)
+        # WSL ではブラウザの自動起動が壊れた WSL 内ブラウザを掴み、リダイレクトが
+        # ローカルサーバに届かずタイムアウトする。自動起動はせず URL を表示し、
+        # Windows 側のブラウザで開いてもらう（WSL2 は Windows → localhost の
+        # ポート転送が効くため、リダイレクトはそのまま届く）。
+        creds = flow.run_local_server(
+            port=0,
+            open_browser=False,
+            authorization_prompt_message=(
+                "次の URL をブラウザで開いて認証してください"
+                "（WSL の場合は Windows 側のブラウザで開く）:\n{url}"
+            ),
+        )
 
     cfg.token_path.parent.mkdir(parents=True, exist_ok=True)
     cfg.token_path.write_text(creds.to_json(), encoding="utf-8")

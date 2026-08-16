@@ -1,11 +1,14 @@
-"""gmail.load_client_config（1Password env mount 対応）のテスト。"""
+"""gmail の認証まわり（load_client_config / get_credentials）のテスト。ネットワークなし。"""
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
+from google.auth.exceptions import RefreshError
 
-from numa_inbox_zero.gmail import load_client_config
+from numa_inbox_zero.config import Config
+from numa_inbox_zero.gmail import get_credentials, load_client_config
 
 CLIENT_CONFIG = {
     "installed": {
@@ -47,3 +50,69 @@ class TestLoadClientConfig:
     def test_web形式のクライアント設定も受け付ける(self):
         config = load_client_config('{"web": {"client_id": "x"}}', Path("/nonexistent"))
         assert "web" in config
+
+
+class TestGetCredentials:
+    def _config(self, tmp_path) -> Config:
+        cfg = Config(credentials_json=json.dumps(CLIENT_CONFIG))
+        cfg.token_path = tmp_path / "tokens" / "default.json"
+        cfg.token_path.parent.mkdir(parents=True)
+        return cfg
+
+    def test_refresh_tokenが失効していたらOAuthフローをやり直す(self, tmp_path):
+        """OAuth 同意画面が「テスト」ステータスだとリフレッシュトークンが7日で
+        失効し invalid_grant になる。auth コマンドがトレースバックで死なず、
+        フローを再実行して新しいトークンを保存できることを保証する。"""
+        cfg = self._config(tmp_path)
+        cfg.token_path.write_text("{}", encoding="utf-8")
+
+        stale = MagicMock(valid=False, expired=True, refresh_token="stale")
+        stale.refresh.side_effect = RefreshError(
+            "invalid_grant: Token has been expired or revoked."
+        )
+        fresh = MagicMock(valid=True)
+        fresh.to_json.return_value = '{"token": "fresh"}'
+        flow = MagicMock()
+        flow.run_local_server.return_value = fresh
+
+        with (
+            patch(
+                "numa_inbox_zero.gmail.Credentials.from_authorized_user_file",
+                return_value=stale,
+            ),
+            patch(
+                "numa_inbox_zero.gmail.InstalledAppFlow.from_client_config",
+                return_value=flow,
+            ),
+        ):
+            creds = get_credentials(cfg)
+
+        assert creds is fresh
+        flow.run_local_server.assert_called_once()
+        # WSL で壊れたブラウザの自動起動を避ける（URL 手動オープン方式）
+        assert flow.run_local_server.call_args.kwargs["open_browser"] is False
+        assert cfg.token_path.read_text(encoding="utf-8") == '{"token": "fresh"}'
+
+    def test_refreshが成功したらフローは起動しない(self, tmp_path):
+        cfg = self._config(tmp_path)
+        cfg.token_path.write_text("{}", encoding="utf-8")
+
+        stale = MagicMock(valid=False, expired=True, refresh_token="ok")
+        stale.to_json.return_value = '{"token": "refreshed"}'
+
+        def refresh(_request):
+            stale.valid = True
+
+        stale.refresh.side_effect = refresh
+
+        with (
+            patch(
+                "numa_inbox_zero.gmail.Credentials.from_authorized_user_file",
+                return_value=stale,
+            ),
+            patch("numa_inbox_zero.gmail.InstalledAppFlow.from_client_config") as mock_flow,
+        ):
+            creds = get_credentials(cfg)
+
+        assert creds is stale
+        mock_flow.assert_not_called()

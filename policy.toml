@@ -1,0 +1,133 @@
+# 分類ポリシー。このファイルが唯一のチューニング面。
+#
+# Jev（TypeSafe System One）の Choice 質問の criteria としてそのまま送られる。
+# category 名がオプション、description がその説明文になり、action がコード側の
+# 対応（archive / star）を決める。モデルは action を知らず、カテゴリだけを選ぶ。
+#
+# description は英語主体 + 日本語のキーワード併記にしている。Jev の主要学習言語は
+# 英語（docs/models#language-support）だが判定対象は日本語メールのため、
+# 語彙の手がかりを両言語で与える。
+#
+# Jev は書かれた条件を字義どおりに読む（model-jaggedness/jev-1.13）。
+# 「言いたかったこと」ではなく「書いた条件」で答えるため、境界例は description に書く。
+
+[thresholds]
+# archive は 2 値のうち唯一「受信トレイから消えて目に入らなくなる」不可逆側の操作。
+# Jev の confidence は較正済み（probabilities から導出される 0..1）なので、
+# これを下回る archive は star に降格して人間の目に入れる。
+# 値は `eval sweep` で保存済み結果に対して掃引して決める（API 再呼び出し不要）。
+archive_confidence = 0.85
+
+# 本文に自動処理系への指示が含まれている疑いの強さ（Noul）。
+# これを超えたら archive させず star に倒す。Jev は state を敵対的入力として
+# 扱わないと明言されているため、判定そのものをコード側のゲートで二重化する。
+injection = 0.5
+
+# ここから下が Choice のオプション。archive が 8 種、star が 11 種。
+# オプションを増やすコストは数トークンなので、粒度は細かいまま維持してよい
+# （docs/primitives/choice: 候補は絞らず全部渡すほうがよい）。
+
+# --- archive: 読む必要がない ---
+
+[[category]]
+name = "service_notification_normal"
+action = "archive"
+description = "Automated notification reporting that something succeeded or is operating normally: CI build passed, deploy finished, scheduled job completed, monitoring health report. 正常系の機械的な通知（ビルド成功・デプロイ完了・定期レポート）"
+
+[[category]]
+name = "newsletter_promotion"
+action = "archive"
+description = "Newsletter, marketing email, advertisement, sale or campaign announcement. メールマガジン・宣伝・キャンペーン・セール案内"
+
+[[category]]
+name = "social_reaction"
+action = "archive"
+description = "Social network activity notification about reactions to content: likes, follows, mentions, friend suggestions. SNS の「いいね」「フォロー」通知"
+
+[[category]]
+name = "collab_digest"
+action = "archive"
+description = "Digest from a collaboration tool saying that pages, issues or documents were updated, with no request directed at the recipient. Notion・GitHub 等の「更新がありました」ダイジェスト"
+
+[[category]]
+name = "calendar_rsvp"
+action = "archive"
+description = "Notification that someone accepted or declined a calendar invitation. The invitation itself and a confirmed schedule are NOT this category. カレンダーの出欠応答通知（承諾・辞退）"
+
+# 配送は LINE 通知で確認・時間変更まで済ませており、メールを見る必要がない（本人確認済み）。
+[[category]]
+name = "delivery_notice"
+action = "archive"
+description = "Shipping or delivery status notification: dispatched, out for delivery, estimated arrival, delivery completed, redelivery request link. 配送状況の通知（発送済み・配達中・お届け予定・お届け完了）"
+
+[[category]]
+name = "routine_receipt"
+action = "archive"
+description = "Receipt or purchase confirmation for a recurring charge of a predictable amount, such as a monthly subscription. A one-off purchase or an unexpected amount is NOT this category. 毎月同額のサブスク領収書など、金額確認が不要な定期的な領収書"
+
+[[category]]
+name = "self_action_confirmation"
+action = "archive"
+description = "Confirmation that an action the recipient deliberately performed has completed, and nothing needs to be kept for later reference: unsubscribe confirmed, donation stopped, form submitted. 自分が行った操作の完了確認（購読解除・支援停止等）"
+
+# --- star: 自分の目で確認が必要 ---
+
+[[category]]
+name = "invoice_payment"
+action = "star"
+description = "Invoice, bill, payment request, or a notice that a payment failed or is overdue. 請求書・支払い依頼・支払い失敗の通知"
+
+# 定期的でも金額の目視確認が必要なので archive に落とさない。
+[[category]]
+name = "account_transaction"
+action = "star"
+description = "Notification of money moving on a bank account or card: withdrawal, direct debit, deposit, card charge, transfer. Included even when it recurs on a schedule, because the amount needs to be read. 出金・引き落とし・入金・カード利用などの取引通知"
+
+[[category]]
+name = "booking_ticket"
+action = "star"
+description = "Confirmation of a reservation, ticket or registration that has to be presented or referred to later: travel ticket, event ticket, hotel booking, account registration completed. 予約・チケット購入・登録完了（あとで提示・参照するもの）"
+
+[[category]]
+name = "contract_legal"
+action = "star"
+description = "Contract, agreement, terms signature request, or correspondence from a legal or compliance function. 契約・法務関連"
+
+[[category]]
+name = "calendar_invite"
+action = "star"
+description = "Calendar invitation addressed to the recipient, a request to pick a time, or notice that a schedule is now fixed or changed. カレンダー招待・日程調整の打診・日程確定の連絡"
+
+[[category]]
+name = "alert_failure"
+action = "star"
+description = "Alert that something is broken or at risk: outage, security alert, failed CI build, failed scheduled job, error rate spike. 障害・セキュリティアラート・CI やスケジュール実行の失敗"
+
+[[category]]
+name = "service_change_deadline"
+action = "star"
+description = "Announcement that a service, app or plan is ending, or a specification change that requires the recipient to act before a deadline. サービス終了・提供終了・期限までに対応が必要な仕様変更"
+
+[[category]]
+name = "community_event"
+action = "star"
+description = "Announcement or organiser message from an event or community the recipient has registered with, such as a meetup or user group. 参加登録しているイベント・コミュニティ（connpass 等）の開催案内・運営メッセージ"
+
+# 自分の操作の結果でも、意図しない削除・乗っ取りの可能性があるため目に入るべき。
+[[category]]
+name = "account_security_change"
+action = "star"
+description = "Notification that an account, workspace or data was deleted, that permissions changed, or that a sign-in or new device was detected. Harmful if it was not intended by the recipient. アカウント・データの削除、権限変更、ログイン通知"
+
+[[category]]
+name = "human_message"
+action = "star"
+description = "Message written by a person to the recipient, expecting a human response: a question, a request, a consultation, a quote or order enquiry, an offer to find a meeting time. 人間からの質問・依頼・相談・見積や発注の打診"
+
+# どのカテゴリにも当てはまらないものは star に倒す。Choice には必ず逃げ道を
+# 用意する（docs/primitives/choice）。ここに落ちる件数が増えたら
+# カテゴリの追加を検討する材料になる。
+[[category]]
+name = "other"
+action = "star"
+description = "None of the other categories fits this email. 上記のどれにも当てはまらない"

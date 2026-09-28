@@ -17,15 +17,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from .config import GMAIL_SCOPES, PROCESSED_LABEL, Config
-from .mail import (
-    build_reply_mime,
-    build_reply_references,
-    build_reply_subject,
-    choose_reply_address,
-    extract_body,
-    get_header,
-    truncate_body,
-)
+from .mail import extract_body, get_header, truncate_body
 
 
 def load_client_config(credentials_json: str | None, credentials_path: Path) -> dict:
@@ -182,10 +174,6 @@ def _shape_message(raw: dict, body_limit: int) -> dict:
         "subject": get_header(headers, "Subject"),
         "date": get_header(headers, "Date"),
         "labels": raw.get("labelIds", []),
-        # 返信ドラフトのスレッド紐付けに必要な RFC 5322 ヘッダ
-        "rfc_message_id": get_header(headers, "Message-ID"),
-        "rfc_references": get_header(headers, "References"),
-        "reply_to": get_header(headers, "Reply-To"),
         "body": body,
         "body_truncated": truncated,
     }
@@ -198,35 +186,3 @@ def modify_labels(service, message_id: str, add: list[str], remove: list[str]) -
     if remove:
         body["removeLabelIds"] = remove
     service.users().messages().modify(userId="me", id=message_id, body=body).execute()
-
-
-def create_reply_draft(service, message: dict, draft_body: str) -> str:
-    """返信ドラフトを作成し、draft の ID を返す。
-
-    threadId を message オブジェクト配下に指定することで Gmail 上の
-    スレッドに、In-Reply-To / References で RFC 5322 レベルの
-    スレッドに、それぞれ紐づける。送信はしない。
-    """
-    to_addr = choose_reply_address(message.get("reply_to", ""), message.get("from", ""))
-    if not to_addr:
-        raise ValueError(f"返信先が特定できない: message_id={message['message_id']}")
-
-    raw = build_reply_mime(
-        to_addr=to_addr,
-        subject=build_reply_subject(message.get("subject", "")),
-        body=draft_body,
-        in_reply_to=message.get("rfc_message_id", ""),
-        references=build_reply_references(
-            message.get("rfc_references", ""), message.get("rfc_message_id", "")
-        ),
-    )
-    draft = (
-        service.users()
-        .drafts()
-        .create(
-            userId="me",
-            body={"message": {"raw": raw, "threadId": message["thread_id"]}},
-        )
-        .execute()
-    )
-    return draft["id"]

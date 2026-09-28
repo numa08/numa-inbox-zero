@@ -1,10 +1,15 @@
-"""eval サブコマンドの統合テスト（claude CLI はモック、ネットワークなし）。"""
+"""eval サブコマンドの統合テスト（Jev 呼び出しはモック、ネットワークなし）。"""
 
 import argparse
 import json
 from unittest.mock import patch
 
-from numa_inbox_zero.__main__ import cmd_eval_diff, cmd_eval_import, cmd_eval_run
+from numa_inbox_zero.__main__ import (
+    cmd_eval_diff,
+    cmd_eval_import,
+    cmd_eval_run,
+    cmd_eval_sweep,
+)
 from numa_inbox_zero.classify import ClassifyOutcome
 from numa_inbox_zero.config import Config
 
@@ -37,10 +42,21 @@ def _golden(message_id, expected):
 def _outcome(decisions, cost=0.05):
     return ClassifyOutcome(
         decisions=decisions,
-        model="claude-sonnet-5",
+        model="jev-1.13.0",
         usage={"input_tokens": 100},
         total_cost_usd=cost,
     )
+
+
+def _judgment(message_id, action="star", confidence=0.95, injection=0.01):
+    return {
+        "message_id": message_id,
+        "action": action,
+        "category": "newsletter_promotion" if action == "archive" else "invoice_payment",
+        "confidence": confidence,
+        "injection": injection,
+        "reason": "r",
+    }
 
 
 def _write_decisions(cfg: Config, records):
@@ -131,31 +147,49 @@ class TestEvalRun:
     def test_採点結果がファイルに保存される(self, tmp_path):
         cfg = _make_config(tmp_path)
         _write_golden(cfg, [_golden("m1", "star"), _golden("m2", "archive")])
-        (tmp_path / "policy.md").write_text("policy", encoding="utf-8")
-        cfg.policy_path = tmp_path / "policy.md"
 
         outcome = _outcome(
             [
-                {"message_id": "m1", "action": "star", "reason": "r"},
-                {"message_id": "m2", "action": "star", "reason": "r"},  # 誤り
+                _judgment("m1", "star"),
+                _judgment("m2", "star"),  # 誤り
             ]
         )
         with patch(
-            "numa_inbox_zero.__main__.classify_mod.run_claude_classifier",
+            "numa_inbox_zero.__main__.classify_mod.run_jev_classifier",
             return_value=outcome,
         ) as mock_run:
             code = cmd_eval_run(cfg, argparse.Namespace(name="exp1", model=None))
 
         assert code == 0
         # ゴールデンのメールが分類器に渡っている
-        passed_inbox = mock_run.call_args.kwargs["inbox"]
-        assert [m["message_id"] for m in passed_inbox["messages"]] == ["m1", "m2"]
+        passed = mock_run.call_args.kwargs["messages"]
+        assert [m["message_id"] for m in passed] == ["m1", "m2"]
 
         result = json.loads((cfg.eval_results_dir / "exp1.json").read_text(encoding="utf-8"))
         assert result["metrics"]["accuracy"] == 0.5
         assert result["golden_count"] == 2
         assert result["predictions"] == {"m1": "star", "m2": "star"}
         assert result["policy_hash"]
+        assert result["questions_hash"]
+        assert result["backend"] == "jev"
+        assert result["thresholds"]["archive_confidence"] > 0
+
+    def test_採点は本番と同じゲートを通した結果で行われる(self, tmp_path):
+        """confidence が閾値未満の archive は評価でも star として採点される。"""
+        cfg = _make_config(tmp_path)
+        _write_golden(cfg, [_golden("m1", "archive")])
+
+        with patch(
+            "numa_inbox_zero.__main__.classify_mod.run_jev_classifier",
+            return_value=_outcome([_judgment("m1", "archive", confidence=0.1)]),
+        ):
+            assert cmd_eval_run(cfg, argparse.Namespace(name="gated", model=None)) == 0
+
+        result = json.loads((cfg.eval_results_dir / "gated.json").read_text(encoding="utf-8"))
+        assert result["predictions"] == {"m1": "star"}
+        # 掃引できるよう降格前の判定と生の confidence が残る
+        assert result["judgments"]["m1"]["proposed_action"] == "archive"
+        assert result["judgments"]["m1"]["confidence"] == 0.1
 
     def test_未ラベルのみならエラー終了(self, tmp_path):
         cfg = _make_config(tmp_path)
@@ -166,15 +200,56 @@ class TestEvalRun:
     def test_modelフラグでモデルを上書きできる(self, tmp_path):
         cfg = _make_config(tmp_path)
         _write_golden(cfg, [_golden("m1", "star")])
-        (tmp_path / "policy.md").write_text("p", encoding="utf-8")
-        cfg.policy_path = tmp_path / "policy.md"
 
         with patch(
-            "numa_inbox_zero.__main__.classify_mod.run_claude_classifier",
-            return_value=_outcome([{"message_id": "m1", "action": "star", "reason": "r"}]),
+            "numa_inbox_zero.__main__.classify_mod.run_jev_classifier",
+            return_value=_outcome([_judgment("m1", "star")]),
         ) as mock_run:
-            cmd_eval_run(cfg, argparse.Namespace(name="h1", model="haiku"))
-        assert mock_run.call_args.kwargs["model"] == "haiku"
+            cmd_eval_run(cfg, argparse.Namespace(name="h1", model="jev-preview"))
+        assert mock_run.call_args.kwargs["model"] == "jev-preview"
+
+
+class TestEvalSweep:
+    def _result(self, cfg, name, judgments):
+        cfg.eval_results_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.eval_results_dir / f"{name}.json").write_text(
+            json.dumps(
+                {
+                    "name": name,
+                    "thresholds": {"archive_confidence": 0.85, "injection": 0.5},
+                    "judgments": judgments,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_保存済み結果からAPIを呼ばずに掃引する(self, tmp_path, capsys):
+        cfg = _make_config(tmp_path)
+        _write_golden(cfg, [_golden("m1", "archive"), _golden("m2", "star")])
+        self._result(
+            cfg,
+            "exp1",
+            {
+                "m1": {"proposed_action": "archive", "confidence": 0.95, "injection": 0.0},
+                "m2": {"proposed_action": "archive", "confidence": 0.7, "injection": 0.0},
+            },
+        )
+
+        assert cmd_eval_sweep(cfg, argparse.Namespace(name="exp1", injection=None)) == 0
+        out = capsys.readouterr().out
+        assert "false_arch" in out
+        assert "0.95" in out
+
+    def test_judgmentsが無い結果ファイルはエラー終了(self, tmp_path):
+        cfg = _make_config(tmp_path)
+        _write_golden(cfg, [_golden("m1", "archive")])
+        cfg.eval_results_dir.mkdir(parents=True, exist_ok=True)
+        (cfg.eval_results_dir / "old.json").write_text(json.dumps({"name": "old"}), "utf-8")
+        assert cmd_eval_sweep(cfg, argparse.Namespace(name="old", injection=None)) == 1
+
+    def test_結果ファイルがなければエラー終了(self, tmp_path):
+        cfg = _make_config(tmp_path)
+        assert cmd_eval_sweep(cfg, argparse.Namespace(name="none", injection=None)) == 1
 
 
 class TestEvalDiff:
@@ -185,14 +260,14 @@ class TestEvalDiff:
         base = {
             "name": "a",
             "golden_hash": "g",
-            "metrics": {"archive_precision": 0.97, "reply_recall": 0.8, "accuracy": 0.9},
+            "metrics": {"archive_precision": 0.97, "archive_recall": 0.8, "accuracy": 0.9},
             "cost_usd": 0.3,
             "predictions": {"m1": "star"},
         }
         challenger = dict(
             base,
             name="b",
-            metrics={"archive_precision": 0.93, "reply_recall": 0.8, "accuracy": 0.9},
+            metrics={"archive_precision": 0.93, "archive_recall": 0.8, "accuracy": 0.9},
             predictions={"m1": "archive"},
         )
         (cfg.eval_results_dir / "a.json").write_text(json.dumps(base), encoding="utf-8")

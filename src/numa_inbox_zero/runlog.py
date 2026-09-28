@@ -57,7 +57,7 @@ def build_decision_record(
         "message_id": record.message_id,
         "action": record.action,
         "applied": record.applied,
-        "partial_reason": record.partial_reason,
+        "failure_reason": record.failure_reason,
     }
     if message is not None:
         entry["thread_id"] = message.get("thread_id")
@@ -67,11 +67,13 @@ def build_decision_record(
         entry["body_chars"] = len(message.get("body", ""))
     if decision is not None:
         entry["reason"] = decision.get("reason", "")
-        if decision.get("confidence"):
-            entry["confidence"] = decision["confidence"]
-        # 降格されたものは元の判定を残し、分類器のチューニング材料にする
+        entry["category"] = decision.get("category")
+        # 閾値のチューニングは保存済みの数値に対して行うため、確率はそのまま残す
+        for key in ("confidence", "injection"):
+            if decision.get(key) is not None:
+                entry[key] = decision[key]
+        # 降格されたものは元の判定と理由を残し、閾値のチューニング材料にする
         if decision.get("downgraded_from"):
             entry["downgraded_from"] = decision["downgraded_from"]
-    if record.draft_id:
-        entry["draft_id"] = record.draft_id
+            entry["downgrade_reason"] = decision.get("downgrade_reason")
     return entry

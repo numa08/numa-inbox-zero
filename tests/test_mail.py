@@ -1,18 +1,14 @@
 """mail.py（純粋な変換処理）のテスト。"""
 
 import base64
-from email import message_from_bytes, policy
 
 from numa_inbox_zero.mail import (
-    build_reply_mime,
-    build_reply_references,
-    build_reply_subject,
-    choose_reply_address,
     decode_body_data,
     extract_body,
     from_domain,
     get_header,
     html_to_text,
+    sender_name,
     truncate_body,
 )
 
@@ -109,89 +105,17 @@ class TestGetHeader:
         assert get_header([], "Subject") == ""
 
 
-class TestBuildReplySubject:
-    def test_Reを付与する(self):
-        assert build_reply_subject("見積の件") == "Re: 見積の件"
-
-    def test_既にReで始まっていれば重複させない(self):
-        assert build_reply_subject("Re: 見積の件") == "Re: 見積の件"
-
-    def test_大文字REも重複させない(self):
-        assert build_reply_subject("RE: Quote") == "RE: Quote"
-
-    def test_re_の前後に空白があっても検知する(self):
-        assert build_reply_subject(" re : hello") == " re : hello"
-
-
-class TestChooseReplyAddress:
-    def test_ReplyToを優先する(self):
-        assert choose_reply_address("reply@example.com", "from@example.com") == "reply@example.com"
-
-    def test_ReplyToがなければFrom(self):
-        assert choose_reply_address("", "Taro <from@example.com>") == "Taro <from@example.com>"
-
-    def test_どちらも無効なら空文字(self):
-        assert choose_reply_address("", "") == ""
-
-
-class TestBuildReplyReferences:
-    def test_ReferencesにMessageIDを連結(self):
-        assert build_reply_references("<a@x> <b@x>", "<c@x>") == "<a@x> <b@x> <c@x>"
-
-    def test_Referencesが空ならMessageIDのみ(self):
-        assert build_reply_references("", "<c@x>") == "<c@x>"
-
-    def test_両方空なら空文字(self):
-        assert build_reply_references("", "") == ""
-
-
-class TestBuildReplyMime:
-    def _decode(self, raw: str):
-        padded = raw + "=" * (-len(raw) % 4)
-        # policy.default で RFC 2047 エンコードされたヘッダを自動復号する
-        return message_from_bytes(base64.urlsafe_b64decode(padded), policy=policy.default)
-
-    def test_スレッド紐付けヘッダが入る(self):
-        raw = build_reply_mime(
-            to_addr="taro@example.com",
-            subject="Re: 見積の件",
-            body="承知しました。",
-            in_reply_to="<orig@example.com>",
-            references="<root@example.com> <orig@example.com>",
-        )
-        msg = self._decode(raw)
-        assert msg["To"] == "taro@example.com"
-        assert msg["In-Reply-To"] == "<orig@example.com>"
-        assert msg["References"] == "<root@example.com> <orig@example.com>"
-
-    def test_日本語の件名と本文が復元できる(self):
-        raw = build_reply_mime(
-            to_addr="taro@example.com",
-            subject="Re: 見積の件",
-            body="お世話になっております。",
-            in_reply_to="<orig@example.com>",
-            references="<orig@example.com>",
-        )
-        msg = self._decode(raw)
-        assert "見積の件" in str(msg["Subject"])
-        assert "お世話になっております。" in msg.get_content()
-
-    def test_ヘッダが空ならInReplyToとReferencesを付けない(self):
-        raw = build_reply_mime(
-            to_addr="taro@example.com",
-            subject="Re: x",
-            body="b",
-            in_reply_to="",
-            references="",
-        )
-        msg = self._decode(raw)
-        assert msg["In-Reply-To"] is None
-        assert msg["References"] is None
-
-
 class TestFromDomain:
     def test_表示名付きアドレスからドメインを取る(self):
         assert from_domain("Taro Yamada <taro@Example.COM>") == "example.com"
 
     def test_アドレスがなければ空文字(self):
         assert from_domain("not-an-address") == ""
+
+
+class TestSenderName:
+    def test_表示名を取り出す(self):
+        assert sender_name("Taro Yamada <taro@example.com>") == "Taro Yamada"
+
+    def test_表示名がなければ空文字(self):
+        assert sender_name("taro@example.com") == ""

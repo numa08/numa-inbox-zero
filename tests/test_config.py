@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from numa_inbox_zero.config import Config, accounts_from_env, poll_interval_seconds
+from numa_inbox_zero.config import (
+    DEFAULT_MODEL,
+    Config,
+    accounts_from_env,
+    poll_interval_seconds,
+)
 
 
 class TestAccountSeparation:
@@ -74,3 +79,42 @@ class TestDaemonSettings:
     def test_NIZ_POLL_INTERVALで間隔を変えられる(self, monkeypatch):
         monkeypatch.setenv("NIZ_POLL_INTERVAL", "60")
         assert poll_interval_seconds() == 60
+
+
+class TestTypeSafeSettings:
+    def test_NIZ_TYPESAFE_API_KEYを読む(self, monkeypatch):
+        monkeypatch.setenv("NIZ_TYPESAFE_API_KEY", "niz-key")
+        monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+        assert Config().typesafe_api_key == "niz-key"
+
+    def test_SDK標準のTYPESAFE_API_KEYもフォールバックとして読む(self, monkeypatch):
+        monkeypatch.delenv("NIZ_TYPESAFE_API_KEY", raising=False)
+        monkeypatch.setenv("TYPESAFE_API_KEY", "sdk-key")
+        assert Config().typesafe_api_key == "sdk-key"
+
+    def test_NIZ側が優先される(self, monkeypatch):
+        monkeypatch.setenv("NIZ_TYPESAFE_API_KEY", "niz-key")
+        monkeypatch.setenv("TYPESAFE_API_KEY", "sdk-key")
+        assert Config().typesafe_api_key == "niz-key"
+
+    def test_未設定ならNone(self, monkeypatch):
+        monkeypatch.delenv("NIZ_TYPESAFE_API_KEY", raising=False)
+        monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
+        assert Config().typesafe_api_key is None
+
+    def test_モデルの既定はバージョン固定(self, monkeypatch):
+        """confidence の閾値はモデルバージョンに紐づくため alias を既定にしない。"""
+        monkeypatch.delenv("NIZ_MODEL", raising=False)
+        assert Config().model == DEFAULT_MODEL
+        assert DEFAULT_MODEL != "jev-latest"
+
+    def test_NIZ_MODELでモデルを変えられる(self, monkeypatch):
+        monkeypatch.setenv("NIZ_MODEL", "jev-preview")
+        assert Config().model == "jev-preview"
+
+    def test_ゲートウェイ経由にするbase_urlは既定では未設定(self, monkeypatch):
+        monkeypatch.delenv("NIZ_TYPESAFE_BASE_URL", raising=False)
+        assert Config().typesafe_base_url is None
+
+    def test_ポリシーはpolicy_tomlを指す(self):
+        assert Config().policy_path.name == "policy.toml"

@@ -1,6 +1,8 @@
 # numa-inbox-zero
 
-Gmail の受信トレイの未処理メールを Claude で分類し、アーカイブ / スター / 返信ドラフト作成を自動実行する個人用ツール。設計の詳細は [SPEC.md](SPEC.md)。ライセンスは [MIT](LICENSE)。
+Gmail の受信トレイの未処理メールを [Jev](https://typesafe.ai)（TypeSafe の System One モデル）で分類し、アーカイブ / スターを自動適用する個人用ツール。設計の詳細は [SPEC.md](SPEC.md)。ライセンスは [MIT](LICENSE)。
+
+判定は「読む必要がない → archive」「自分の目で確認が必要 → star」の 2 値。確信が足りないもの・本文が自動処理系に指示を出そうとしているものは archive せず star に倒す。メールの送信・下書き作成は一切行わない。
 
 ## セットアップ
 
@@ -9,6 +11,12 @@ Gmail の受信トレイの未処理メールを Claude で分類し、アーカ
 ```bash
 uv sync
 ```
+
+### TypeSafe（Jev）の API キー
+
+[console.typesafe.ai](https://console.typesafe.ai/) でキーを発行し、1Password のアイテムに保存して `.env.op` の `NIZ_TYPESAFE_API_KEY` に secret reference を書く。SDK 標準の `TYPESAFE_API_KEY` でも読める。
+
+**`.env.op` が無いと `run.sh` はキーを注入しない。** run.sh は `.env.op` があるときだけ `op run` を通すため、ファイルが無いと分類が毎サイクル失敗する（`logs/scheduler.log` に「分類を実行できない」が残る）。`cp .env.op.example .env.op` を忘れないこと。
 
 ### Google 認証（1Password 経由）
 
@@ -73,7 +81,7 @@ NIZ_ACCOUNTS=personal,work,private
 ./run.sh daemon
 ```
 
-プロセスを立ち上げたまま `NIZ_POLL_INTERVAL`（既定 300 秒）ごとに fetch → classify → apply を全アカウントに対して繰り返す。新着ゼロのサイクルは claude を起動せず、runs.jsonl にも記録しない。API 障害等で 1 サイクルが失敗してもプロセスは死なず、次のポーリングで再試行する。
+プロセスを立ち上げたまま `NIZ_POLL_INTERVAL`（既定 300 秒）ごとに fetch → classify → apply を全アカウントに対して繰り返す。新着ゼロのサイクルは API を呼ばず、runs.jsonl にも記録しない。API 障害等で 1 サイクルが失敗してもプロセスは死なず、次のポーリングで再試行する。
 
 タスクスケジューラの登録内容:
 
@@ -128,10 +136,13 @@ schtasks.exe /Delete /TN "numa-inbox-zero"   # 削除
 | `NIZ_ACCOUNT` | `default` | `--account` の既定値 |
 | `NIZ_ACCOUNTS` | `default` | run.sh / daemon が巡回するアカウント（カンマ区切り） |
 | `NIZ_POLL_INTERVAL` | `300` | daemon のポーリング間隔（秒） |
-| `NIZ_MODEL` | `sonnet` | 分類に使うモデル |
+| `NIZ_TYPESAFE_API_KEY` | — | TypeSafe の API キー（`TYPESAFE_API_KEY` でも可） |
+| `NIZ_TYPESAFE_BASE_URL` | — | OpenRouter 等のゲートウェイ経由にする場合のみ |
+| `NIZ_MODEL` | `jev-1.13.0` | 分類に使うモデル |
+| `NIZ_CONCURRENCY` | `8` | 分類の同時リクエスト数 |
 | `NIZ_LOG_SUBJECTS` | `1` | `0` で decisions.jsonl に件名を記録しない |
 
-分類ルールは [policy.md](policy.md) を編集する。ここが唯一のチューニング面。
+分類ルールは [policy.toml](policy.toml) を編集する。ここが唯一のチューニング面 — カテゴリ（Jev に渡す選択肢）と、それぞれを archive / star のどちらにするか、そして降格の閾値がここに集まっている。
 
 ## ログ
 
@@ -154,17 +165,20 @@ uv run numa-inbox-zero --account personal eval import
 # → eval/golden.jsonl を全件レビューし、誤判定だけ expected_action を上書きする
 #   （null のままの行は system_action に同意として採点される）
 
-# ② ベースラインを測る
-uv run numa-inbox-zero eval run --name baseline-sonnet
+# ② 測る
+op run --env-file=.env.op -- uv run numa-inbox-zero eval run --name jev-v1
 
-# ③ 変更して測る（1回に1変数だけ変える）
-uv run numa-inbox-zero eval run --name haiku-v1 --model haiku
+# ③ 閾値を選ぶ（保存済みの結果に対する掃引。API は呼ばない = 追加コスト 0）
+uv run numa-inbox-zero eval sweep jev-v1
 
-# ④ 差分を見る — スコアより「判定が変わった件」の中身で判断する
-uv run numa-inbox-zero eval diff baseline-sonnet haiku-v1
+# ④ 変更して測る（1回に1変数だけ変える）
+op run --env-file=.env.op -- uv run numa-inbox-zero eval run --name jev-v2
+
+# ⑤ 差分を見る — スコアより「判定が変わった件」の中身で判断する
+uv run numa-inbox-zero eval diff jev-v1 jev-v2
 ```
 
-主要メトリクスは `archive_precision`（誤アーカイブしない）と `reply_recall`（返信要を見逃さない）の2つ。誤りコストが非対称（false archive が最も痛い）なため、accuracy は参考値として扱う。
+主要メトリクスは `archive_precision`（誤アーカイブしない）と `archive_recall`（受信トレイを空にできている）の 2 つ。誤りコストが非対称（false archive が最も痛い）なため、accuracy は参考値として扱う。ゴールデンセットの正解の大半は過去のモデルの判定なので、人間が明示的にラベルした行の正答数（`human_labeled`）を併せて見る。
 
 ## 開発
 

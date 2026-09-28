@@ -1,13 +1,14 @@
 [project]
 name = "numa-inbox-zero"
 version = "0.1.0"
-description = "Gmail の受信トレイの未処理メールを Claude で分類してアーカイブ / スター / 返信ドラフト作成を行う個人用ツール"
+description = "Gmail の受信トレイの未処理メールを Jev で分類してアーカイブ / スターを付ける個人用ツール"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 dependencies = [
     "google-api-python-client>=2.140",
     "google-auth-oauthlib>=1.2",
+    "typesafe-sdk>=0.7.2",
 ]
 
 [project.scripts]

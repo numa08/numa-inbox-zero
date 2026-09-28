@@ -8,6 +8,7 @@
 認証情報はリポジトリ内に置かない:
 - クライアント設定は 1Password の env mount（NIZ_CREDENTIALS_JSON に JSON の中身）で注入
 - トークンは XDG state（~/.local/state/numa-inbox-zero/）に保存
+- TypeSafe の API キーも env mount（NIZ_TYPESAFE_API_KEY）で注入する
 """
 
 from __future__ import annotations
@@ -30,13 +31,23 @@ FETCH_QUERY = f"in:inbox -is:starred -label:{PROCESSED_LABEL} newer_than:7d"
 MAX_MESSAGES_PER_RUN = 50
 
 # daemon モードのポーリング間隔（秒）。短くするほど受信から処理までの遅延は減るが、
-# メールが 1 通ずつ分類されて claude 起動の固定コストがかさむ。
+# 1 回のポーリングで分類するメールが減り、リクエスト数あたりの固定コストがかさむ。
 DEFAULT_POLL_INTERVAL_SECONDS = 300
 
-# 日本語メールはトークン効率が悪く、長文がコストを支配するため切り詰める。
+# 長文は Jev の精度も落とす（無関係な情報が多い state で精度が下がる）ため切り詰める。
+# 短くするほど精度・コストの両方に効く可能性があり、`eval run` で検証する対象。
 BODY_TRUNCATE_CHARS = 2000
 
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+
+# Jev の既定モデル。confidence の閾値はモデルバージョンごとに較正されるため、
+# alias（jev-latest）ではなくバージョンを固定する。上げるときは policy.toml の
+# 閾値を eval で再確認する。
+DEFAULT_MODEL = "jev-1.13.0"
+
+# 分類の同時リクエスト数。レート上限は 1200 req/min なので余裕があるが、
+# 50 通を 8 並列で回せば数秒で終わるため上限を狙う必要はない。
+DEFAULT_CONCURRENCY = 8
 
 DEFAULT_ACCOUNT = "default"
 
@@ -73,11 +84,24 @@ class Config:
     token_path: Path | None = None
     work_dir: Path | None = None
     logs_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "logs")
-    prompts_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "prompts")
-    schemas_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "schemas")
-    policy_path: Path = field(default_factory=lambda: PROJECT_ROOT / "policy.md")
+    policy_path: Path = field(default_factory=lambda: PROJECT_ROOT / "policy.toml")
 
-    claude_model: str = field(default_factory=lambda: os.environ.get("NIZ_MODEL", "sonnet"))
+    # Jev のモデル ID。閾値は較正済み confidence に紐づくので alias ではなく
+    # バージョンを固定する（policy.toml の閾値とセットで意味を持つ）。
+    model: str = field(default_factory=lambda: os.environ.get("NIZ_MODEL", DEFAULT_MODEL))
+    # SDK 標準の TYPESAFE_API_KEY も受ける（TypeSafe のドキュメントどおりの環境でも動くように）。
+    typesafe_api_key: str | None = field(
+        default_factory=lambda: (
+            os.environ.get("NIZ_TYPESAFE_API_KEY") or os.environ.get("TYPESAFE_API_KEY")
+        )
+    )
+    # OpenRouter 等のゲートウェイ経由にする場合のみ設定する。未設定なら API 直叩き。
+    typesafe_base_url: str | None = field(
+        default_factory=lambda: os.environ.get("NIZ_TYPESAFE_BASE_URL")
+    )
+    concurrency: int = field(
+        default_factory=lambda: int(os.environ.get("NIZ_CONCURRENCY", DEFAULT_CONCURRENCY))
+    )
     log_subjects: bool = field(
         default_factory=lambda: os.environ.get("NIZ_LOG_SUBJECTS", "1") != "0"
     )

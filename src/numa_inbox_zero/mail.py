@@ -9,7 +9,6 @@ from __future__ import annotations
 import base64
 import html
 import re
-from email.message import EmailMessage
 from email.utils import parseaddr
 
 
@@ -84,59 +83,6 @@ def get_header(headers: list[dict], name: str) -> str:
     return ""
 
 
-_RE_PREFIX = re.compile(r"^\s*re\s*:\s*", re.IGNORECASE)
-
-
-def build_reply_subject(original_subject: str) -> str:
-    """返信件名を作る。既に Re: で始まっていれば重複させない。"""
-    if _RE_PREFIX.match(original_subject):
-        return original_subject
-    return f"Re: {original_subject}"
-
-
-def choose_reply_address(reply_to: str, from_addr: str) -> str:
-    """返信先を決める。Reply-To があればそれを優先する。"""
-    for candidate in (reply_to, from_addr):
-        _, addr = parseaddr(candidate)
-        if addr:
-            return candidate.strip()
-    return ""
-
-
-def build_reply_references(original_references: str, original_message_id: str) -> str:
-    """RFC 5322 の References ヘッダを組み立てる。
-
-    元スレッドの References に元メールの Message-ID を連結する。
-    どちらも無ければ空文字（ヘッダ自体を付けない）。
-    """
-    parts = [p for p in (original_references.strip(), original_message_id.strip()) if p]
-    return " ".join(parts)
-
-
-def build_reply_mime(
-    *,
-    to_addr: str,
-    subject: str,
-    body: str,
-    in_reply_to: str,
-    references: str,
-) -> str:
-    """返信ドラフトの MIME を組み立て、Gmail API 用の base64url 文字列を返す。
-
-    In-Reply-To / References を付けないと Gmail 上でスレッドに紐づかず
-    孤立した下書きになるため、元メールのヘッダから必ず引き継ぐ。
-    """
-    msg = EmailMessage()
-    msg["To"] = to_addr
-    msg["Subject"] = subject
-    if in_reply_to:
-        msg["In-Reply-To"] = in_reply_to
-    if references:
-        msg["References"] = references
-    msg.set_content(body, charset="utf-8")
-    return base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
-
-
 def from_domain(from_header: str) -> str:
     """From ヘッダからドメインだけを取り出す。
 
@@ -146,3 +92,12 @@ def from_domain(from_header: str) -> str:
     if "@" in addr:
         return addr.rsplit("@", 1)[1].lower()
     return ""
+
+
+def sender_name(from_header: str) -> str:
+    """From ヘッダの表示名だけを取り出す。
+
+    分類にはドメインと表示名で足り、アドレスのローカル部までは外部に送らない。
+    """
+    name, _ = parseaddr(from_header)
+    return name.strip()

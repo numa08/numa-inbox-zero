@@ -3,7 +3,7 @@
 サブコマンド:
   auth      OAuth フローを起動して token.json を作る（初回のみ・対話環境）
   fetch     受信トレイの未処理メールを取得して work/inbox.json に書く
-  classify  work/inbox.json を claude -p で分類し work/classification.json に書く
+  classify  work/inbox.json を Jev で分類し work/classification.json に書く
   apply     分類結果を検証して Gmail に適用する
   run       fetch → classify → apply を一括実行（ワンショット定期実行用）
   daemon    常駐してポーリング実行（fetch → classify → apply を interval ごと）
@@ -31,8 +31,9 @@ from .config import (
     accounts_from_env,
     poll_interval_seconds,
 )
+from .policy import PolicyError, load_policy
 from .runlog import append_jsonl, build_decision_record, load_jsonl
-from .validate import downgrade_low_confidence, validate_decisions
+from .validate import gate_archive, validate_decisions
 
 
 def _now_iso() -> str:
@@ -80,13 +81,19 @@ def cmd_classify(cfg: Config, _args) -> int:
         cfg.classify_meta_path.write_text("{}\n", encoding="utf-8")
         return 0
 
-    outcome = classify_mod.run_claude_classifier(
-        inbox=inbox,
-        policy_text=cfg.policy_path.read_text(encoding="utf-8"),
-        model=cfg.claude_model,
-        system_prompt_path=cfg.prompts_dir / "classifier.md",
-        schema_path=cfg.schemas_dir / "classification.json",
-    )
+    try:
+        outcome = classify_mod.run_jev_classifier(
+            messages=inbox["messages"],
+            policy=load_policy(cfg.policy_path),
+            api_key=cfg.typesafe_api_key,
+            model=cfg.model,
+            base_url=cfg.typesafe_base_url,
+            concurrency=cfg.concurrency,
+        )
+    except (classify_mod.ClassifyError, PolicyError) as e:
+        # 設定不備（キー未設定・policy.toml の記述ミス）は traceback より 1 行のほうが読める
+        print(f"分類を実行できない: {e}", file=sys.stderr)
+        return 1
 
     cfg.classification_path.write_text(
         json.dumps({"decisions": outcome.decisions}, ensure_ascii=False, indent=1),
@@ -95,19 +102,29 @@ def cmd_classify(cfg: Config, _args) -> int:
     meta = {
         "backend": outcome.backend,
         "model": outcome.model,
-        "cli_version": outcome.cli_version,
         "usage": outcome.usage,
         "total_cost_usd": outcome.total_cost_usd,
         "duration_ms": outcome.duration_ms,
-        "num_turns": outcome.num_turns,
+        "errors": outcome.errors,
     }
     cfg.classify_meta_path.write_text(
         json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8"
     )
+    # 分類に失敗した通は判定が無いので Gmail 上で手つかずのまま残り、次回再取得される
+    if outcome.errors:
+        print(
+            f"{len(outcome.errors)} 件の分類に失敗（次回の実行で再試行されます）: "
+            f"{outcome.errors[0]['detail']}",
+            file=sys.stderr,
+        )
     print(
         f"{len(outcome.decisions)} 件分類 → {cfg.classification_path} "
-        f"(cost=${outcome.total_cost_usd})"
+        f"(cost=${outcome.total_cost_usd} {outcome.duration_ms}ms)"
     )
+    # 全通失敗（キー失効・レート制限の継続等）は障害。空の判定で apply に進み、
+    # 「成功した空実行」としてログに残るのを防ぐため非ゼロで返す
+    if outcome.errors and not outcome.decisions:
+        return 1
     return 0
 
 
@@ -131,11 +148,12 @@ def cmd_apply(cfg: Config, args) -> int:
         _log_run_error(cfg, inbox, started_at, "decisions が入力件数を超過")
         return 1
 
+    thresholds = load_policy(cfg.policy_path).thresholds
     validation = validate_decisions(decisions, set(messages_by_id))
-    # 確信度の低い archive は star に降格して人間の判断を仰ぐ（検証通過後に適用）
-    validation.accepted, downgraded_count = downgrade_low_confidence(validation.accepted)
+    # 確信度が閾値未満・インジェクションが疑われる archive は star に降格する（検証通過後に適用）
+    validation.accepted, downgraded_count = gate_archive(validation.accepted, thresholds)
     if downgraded_count:
-        print(f"確信度 low の archive {downgraded_count} 件を star に降格しました。")
+        print(f"archive {downgraded_count} 件を star に降格しました。")
 
     if args.dry_run:
         service = None
@@ -147,7 +165,6 @@ def cmd_apply(cfg: Config, args) -> int:
     summary = apply_decisions(
         service,
         validation=validation,
-        messages_by_id=messages_by_id,
         processed_label_id=processed_label_id,
         dry_run=args.dry_run,
     )
@@ -183,15 +200,14 @@ def cmd_apply(cfg: Config, args) -> int:
         "apply": {
             "archived": summary.archived,
             "starred": summary.starred,
-            "drafted": summary.drafted,
             "rejected": summary.rejected,
             "downgraded": downgraded_count,
             "errors": summary.errors,
         },
         "errors": [
-            {"message_id": r.message_id, "detail": r.partial_reason}
+            {"message_id": r.message_id, "detail": r.failure_reason}
             for r in summary.records
-            if r.applied in ("failed", "partial")
+            if r.applied == "failed"
         ],
     }
     append_jsonl(cfg.runs_log_path, run_record)
@@ -199,7 +215,7 @@ def cmd_apply(cfg: Config, args) -> int:
     prefix = "[dry-run] " if args.dry_run else ""
     print(
         f"{prefix}archive={summary.archived} star={summary.starred} "
-        f"draft={summary.drafted} rejected={summary.rejected} errors={summary.errors}"
+        f"rejected={summary.rejected} errors={summary.errors}"
     )
     return 0 if summary.errors == 0 else 1
 
@@ -272,7 +288,11 @@ def cmd_eval_import(cfg: Config, _args) -> int:
 
 
 def cmd_eval_run(cfg: Config, args) -> int:
-    """ゴールデンセットに対して分類器を走らせ、採点結果を保存する。"""
+    """ゴールデンセットに対して分類器を走らせ、採点結果を保存する。
+
+    採点対象は本番と同じく降格後（gate_archive 適用後）の判定。あわせて降格前の
+    生の confidence を結果に残し、閾値の掃引は `eval sweep` でオフラインに行う。
+    """
     entries = evaluate.load_golden(cfg.golden_path)
     labeled, unlabeled = evaluate.split_labeled(entries)
     if not labeled:
@@ -285,28 +305,35 @@ def cmd_eval_run(cfg: Config, args) -> int:
     if unlabeled:
         print(f"注意: 未ラベル {unlabeled} 件はスキップします。")
 
-    model = args.model or cfg.claude_model
-    outcome = classify_mod.run_claude_classifier(
-        inbox=evaluate.build_inbox_from_golden(labeled),
-        policy_text=cfg.policy_path.read_text(encoding="utf-8"),
+    model = args.model or cfg.model
+    policy = load_policy(cfg.policy_path)
+    outcome = classify_mod.run_jev_classifier(
+        messages=evaluate.build_inbox_from_golden(labeled)["messages"],
+        policy=policy,
+        api_key=cfg.typesafe_api_key,
         model=model,
-        system_prompt_path=cfg.prompts_dir / "classifier.md",
-        schema_path=cfg.schemas_dir / "classification.json",
+        base_url=cfg.typesafe_base_url,
+        concurrency=cfg.concurrency,
     )
-    report = evaluate.score_predictions(labeled, outcome.decisions)
+    if outcome.errors:
+        print(f"注意: {len(outcome.errors)} 件が分類に失敗（missing として採点されます）")
+
+    gated, downgraded = gate_archive(outcome.decisions, policy.thresholds)
+    report = evaluate.score_predictions(labeled, gated)
 
     result = evaluate.build_result(
         name=args.name,
         model=outcome.model or model,
-        policy_hash=evaluate.config_hash(
-            [
-                cfg.policy_path,
-                cfg.prompts_dir / "classifier.md",
-                cfg.schemas_dir / "classification.json",
-            ]
-        ),
+        backend=outcome.backend,
+        policy_hash=evaluate.config_hash([cfg.policy_path]),
+        questions=evaluate.questions_hash(classify_mod.questions_payload(policy)),
         golden=evaluate.golden_hash(labeled),
+        thresholds={
+            "archive_confidence": policy.thresholds.archive_confidence,
+            "injection": policy.thresholds.injection,
+        },
         report=report,
+        judgments=evaluate.build_judgments(gated),
         cost_usd=outcome.total_cost_usd,
         usage=outcome.usage,
         executed_at=_now_iso(),
@@ -316,13 +343,46 @@ def cmd_eval_run(cfg: Config, args) -> int:
     result_path.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
 
     m = result["metrics"]
+    human = result["human_labeled"]
     print(
         f"=== {args.name} (model={result['model']}, n={report.total}) ===\n"
         f"archive_precision: {m['archive_precision']}\n"
-        f"reply_recall:      {m['reply_recall']}\n"
+        f"archive_recall:    {m['archive_recall']}\n"
         f"accuracy:          {m['accuracy']}\n"
+        f"人間ラベル分:      {human['correct']}/{human['total']} 正解\n"
+        f"降格:              {downgraded} 件\n"
         f"cost:              ${result['cost_usd']}\n"
         f"不一致 {len(report.mismatches)} 件 → {result_path}"
+    )
+    return 0
+
+
+def cmd_eval_sweep(cfg: Config, args) -> int:
+    """保存済みの結果に対して confidence 閾値を掃引する（API を呼ばない）。"""
+    path = cfg.eval_results_dir / f"{args.name}.json"
+    if not path.exists():
+        print(f"結果ファイルがない: {path}", file=sys.stderr)
+        return 1
+    result = json.loads(path.read_text(encoding="utf-8"))
+    judgments = result.get("judgments")
+    if not judgments:
+        print(
+            f"{path} に judgments がない（Jev 以前の結果ファイルは掃引できない）。",
+            file=sys.stderr,
+        )
+        return 1
+
+    labeled, _ = evaluate.split_labeled(evaluate.load_golden(cfg.golden_path))
+    thresholds = result.get("thresholds", {})
+    injection = args.injection
+    if injection is None:
+        injection = thresholds.get("injection", load_policy(cfg.policy_path).thresholds.injection)
+
+    rows = evaluate.sweep_thresholds(labeled, judgments, injection_threshold=injection)
+    print(f"=== {args.name}: injection={injection} での confidence 掃引 ===")
+    print(evaluate.format_sweep(rows, current=thresholds.get("archive_confidence")))
+    print(
+        "\nfalse_arch = 本来 star のメールをアーカイブした件数。ここを 0 に保てる最小の閾値を選ぶ。"
     )
     return 0
 
@@ -357,7 +417,7 @@ def _daemon_cycle(accounts: list[str], args, config_factory=Config) -> None:
     """全アカウントを 1 巡する。1 アカウントの失敗で残りを止めない。
 
     新着ゼロのアカウントは classify / apply に進まない。ポーリングの大半は空振りで、
-    そのたびに claude を起動したり runs.jsonl に空実行を記録するとコストとログが
+    そのたびに分類 API を呼んだり runs.jsonl に空実行を記録するとコストとログが
     肥大するため。
     """
     for account in accounts:
@@ -432,6 +492,16 @@ def main(argv: list[str] | None = None) -> int:
     p_eval_run = eval_sub.add_parser("run", help="ゴールデンセットで分類器を採点する")
     p_eval_run.add_argument("--name", required=True, help="実験名。結果ファイル名になる")
     p_eval_run.add_argument("--model", default=None, help="モデル上書き（既定は NIZ_MODEL）")
+    p_eval_sweep = eval_sub.add_parser(
+        "sweep", help="保存済み結果に対して archive の confidence 閾値を掃引する（API 不要）"
+    )
+    p_eval_sweep.add_argument("name", help="掃引する実験名")
+    p_eval_sweep.add_argument(
+        "--injection",
+        type=float,
+        default=None,
+        help="injection 閾値の上書き（既定は結果ファイルに記録された値）",
+    )
     p_eval_diff = eval_sub.add_parser("diff", help="2 つの実験結果を比較する")
     p_eval_diff.add_argument("a", help="比較元の実験名")
     p_eval_diff.add_argument("b", help="比較先の実験名")
@@ -443,6 +513,7 @@ def main(argv: list[str] | None = None) -> int:
         eval_handlers = {
             "import": cmd_eval_import,
             "run": cmd_eval_run,
+            "sweep": cmd_eval_sweep,
             "diff": cmd_eval_diff,
         }
         return eval_handlers[args.eval_command](cfg, args)

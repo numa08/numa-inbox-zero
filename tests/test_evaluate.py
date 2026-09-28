@@ -5,15 +5,18 @@ import json
 import pytest
 
 from numa_inbox_zero.evaluate import (
+    build_judgments,
     build_result,
     config_hash,
     diff_results,
     golden_hash,
     import_candidates,
     load_golden,
+    questions_hash,
     score_predictions,
     select_import_targets,
     split_labeled,
+    sweep_thresholds,
 )
 
 
@@ -165,9 +168,9 @@ class TestScorePredictions:
 
     def test_予測がないメールはmissingとして誤り扱い(self):
         """分類器の見逃しもスコアに現れる。"""
-        report = score_predictions([_golden("m1", "reply")], [])
-        assert report.confusion["reply"]["missing"] == 1
-        assert report.reply_recall == 0.0
+        report = score_predictions([_golden("m1", "archive")], [])
+        assert report.confusion["archive"]["missing"] == 1
+        assert report.archive_recall == 0.0
 
     def test_archive_precisionはfalse_archiveで下がる(self):
         golden = [
@@ -178,17 +181,28 @@ class TestScorePredictions:
         report = score_predictions(golden, decisions)
         assert report.archive_precision == 0.5
 
-    def test_reply_recallは見逃しで下がる(self):
-        golden = [_golden("m1", "reply"), _golden("m2", "reply")]
-        decisions = [_decision("m1", "reply"), _decision("m2", "star")]
+    def test_archive_recallは取りこぼしで下がる(self):
+        golden = [_golden("m1", "archive"), _golden("m2", "archive")]
+        decisions = [_decision("m1", "archive"), _decision("m2", "star")]
         report = score_predictions(golden, decisions)
-        assert report.reply_recall == 0.5
+        assert report.archive_recall == 0.5
+
+    def test_人間が明示したラベルだけを別集計する(self):
+        """残りの行の正解は過去のモデルの判定なので、独立した信号を分けて見る。"""
+        golden = [
+            {**_golden("m1", "star"), "human_labeled": True},
+            {**_golden("m2", "star"), "human_labeled": False},
+        ]
+        report = score_predictions(golden, [_decision("m1", "star"), _decision("m2", "archive")])
+        assert report.human_labeled_total == 1
+        assert report.human_labeled_correct == 1
+        assert report.mismatches[0]["human_labeled"] is False
 
     def test_分母ゼロのメトリクスはNoneであり0ではない(self):
-        # archive 予測ゼロ・reply 正解ゼロ
+        # archive 予測ゼロ・archive 正解ゼロ
         report = score_predictions([_golden("m1", "star")], [_decision("m1", "star")])
         assert report.archive_precision is None
-        assert report.reply_recall is None
+        assert report.archive_recall is None
 
     def test_予測はpredictionsに全件残る(self):
         report = score_predictions(
@@ -208,8 +222,18 @@ class TestHashes:
         entries = [_golden("m1"), _golden("m2")]
         assert golden_hash(entries) == golden_hash(list(reversed(entries)))
 
+    def test_questionsの文言が変わればquestions_hashが変わる(self):
+        a = questions_hash({"category": {"criteria": {"x": "A"}}})
+        b = questions_hash({"category": {"criteria": {"x": "B"}}})
+        assert a != b
+
+    def test_questions_hashはキー順に依存しない(self):
+        a = questions_hash({"category": {"a": 1, "b": 2}})
+        b = questions_hash({"category": {"b": 2, "a": 1}})
+        assert a == b
+
     def test_ファイル内容の変更でconfig_hashが変わる(self, tmp_path):
-        path = tmp_path / "policy.md"
+        path = tmp_path / "policy.toml"
         path.write_text("v1", encoding="utf-8")
         h1 = config_hash([path])
         path.write_text("v2", encoding="utf-8")
@@ -221,10 +245,14 @@ class TestDiffResults:
         report = score_predictions([], [])
         result = build_result(
             name=name,
-            model="claude-sonnet-5",
+            model="jev-1.13.0",
+            backend="jev",
             policy_hash="p1",
+            questions="q1",
             golden="g1",
+            thresholds={"archive_confidence": 0.85, "injection": 0.5},
             report=report,
+            judgments={},
             cost_usd=cost,
             usage={},
             executed_at="t",
@@ -253,3 +281,54 @@ class TestDiffResults:
         b["golden_hash"] = "different"
         diff = diff_results(a, b)
         assert any("ゴールデンセット" in w for w in diff["warnings"])
+
+
+class TestBuildJudgments:
+    def test_降格前のactionと生の確率を残す(self):
+        """閾値の掃引は保存済みの値だけで行えるようにする。"""
+        judgments = build_judgments(
+            [
+                {
+                    "message_id": "m1",
+                    "action": "star",
+                    "downgraded_from": "archive",
+                    "category": "newsletter",
+                    "confidence": 0.61,
+                    "injection": 0.03,
+                }
+            ]
+        )
+        assert judgments["m1"]["proposed_action"] == "archive"
+        assert judgments["m1"]["applied_action"] == "star"
+        assert judgments["m1"]["confidence"] == 0.61
+
+
+class TestSweepThresholds:
+    def _judgment(self, confidence, injection=0.0):
+        return {"proposed_action": "archive", "confidence": confidence, "injection": injection}
+
+    def test_閾値を上げるとfalse_archiveが減る(self):
+        labeled = [
+            {**_golden("m1", "archive"), "human_labeled": True},
+            {**_golden("m2", "star"), "human_labeled": True},
+        ]
+        judgments = {"m1": self._judgment(0.95), "m2": self._judgment(0.7)}
+        rows = {
+            r["archive_confidence"]: r
+            for r in sweep_thresholds(labeled, judgments, injection_threshold=0.5)
+        }
+        assert rows[0.7]["false_archive"] == 1
+        assert rows[0.95]["false_archive"] == 0
+        assert rows[0.95]["archive_recall"] == 1.0
+
+    def test_観測されたconfidenceが候補に含まれる(self):
+        labeled = [_golden("m1", "archive")]
+        rows = sweep_thresholds(labeled, {"m1": self._judgment(0.83)}, injection_threshold=0.5)
+        assert 0.83 in [r["archive_confidence"] for r in rows]
+
+    def test_injection閾値を超える判定はアーカイブされない(self):
+        labeled = [_golden("m1", "archive")]
+        rows = sweep_thresholds(
+            labeled, {"m1": self._judgment(0.99, injection=0.9)}, injection_threshold=0.5
+        )
+        assert all(r["archived"] == 0 for r in rows)

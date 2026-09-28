@@ -2,48 +2,36 @@
 
 from unittest.mock import patch
 
+import httplib2
+from googleapiclient.errors import HttpError
+
 from numa_inbox_zero.apply import apply_decisions
 from numa_inbox_zero.validate import validate_decisions
 
 
-def _message(message_id="m1"):
-    return {
-        "message_id": message_id,
-        "thread_id": f"t-{message_id}",
-        "from": "taro@example.com",
-        "subject": "件名",
-        "reply_to": "",
-        "rfc_message_id": f"<{message_id}@example.com>",
-        "rfc_references": "",
-        "body": "本文",
-    }
+def _decision(message_id="m1", action="archive"):
+    return {"message_id": message_id, "action": action, "category": "c", "reason": "r"}
 
 
-def _run(decisions, messages, dry_run=False, modify=None, draft=None):
-    validation = validate_decisions(decisions, {m["message_id"] for m in messages})
-    with (
-        patch("numa_inbox_zero.apply.gmail.modify_labels", side_effect=modify) as mock_modify,
-        patch(
-            "numa_inbox_zero.apply.gmail.create_reply_draft",
-            side_effect=draft,
-            return_value="draft-1" if draft is None else None,
-        ) as mock_draft,
-    ):
+def _http_error() -> HttpError:
+    return HttpError(httplib2.Response({"status": 500}), b"boom")
+
+
+def _run(decisions, allowed_ids, dry_run=False, modify=None):
+    validation = validate_decisions(decisions, set(allowed_ids))
+    with patch("numa_inbox_zero.apply.gmail.modify_labels", side_effect=modify) as mock_modify:
         summary = apply_decisions(
             service=object(),
             validation=validation,
-            messages_by_id={m["message_id"]: m for m in messages},
             processed_label_id="Label_1",
             dry_run=dry_run,
         )
-    return summary, mock_modify, mock_draft
+    return summary, mock_modify
 
 
 class TestApplyActions:
     def test_archiveはINBOXを外しprocessedを付ける(self):
-        summary, mock_modify, _ = _run(
-            [{"message_id": "m1", "action": "archive", "reason": "r"}], [_message()]
-        )
+        summary, mock_modify = _run([_decision()], {"m1"})
         assert summary.archived == 1
         mock_modify.assert_called_once()
         _, kwargs = mock_modify.call_args
@@ -51,61 +39,37 @@ class TestApplyActions:
         assert kwargs["remove"] == ["INBOX"]
 
     def test_starはSTARREDとprocessedを付けINBOXから外す(self):
-        summary, mock_modify, _ = _run(
-            [{"message_id": "m1", "action": "star", "reason": "r"}], [_message()]
-        )
+        summary, mock_modify = _run([_decision(action="star")], {"m1"})
         assert summary.starred == 1
         _, kwargs = mock_modify.call_args
         assert kwargs["add"] == ["STARRED", "Label_1"]
         assert kwargs["remove"] == ["INBOX"]
 
-    def test_replyのラベル付与でもINBOXから外す(self):
-        summary, mock_modify, _ = _run(
-            [{"message_id": "m1", "action": "reply", "reason": "r", "draft_body": "承知"}],
-            [_message()],
-        )
-        assert summary.drafted == 1
-        _, kwargs = mock_modify.call_args
-        assert kwargs["add"] == ["STARRED", "Label_1"]
-        assert kwargs["remove"] == ["INBOX"]
-
-    def test_replyはラベル付与のあとにドラフト作成(self):
-        call_order = []
-        summary, _, _ = _run(
-            [{"message_id": "m1", "action": "reply", "reason": "r", "draft_body": "承知"}],
-            [_message()],
-            modify=lambda *a, **k: call_order.append("modify"),
-            draft=lambda *a, **k: call_order.append("draft") or "draft-1",
-        )
-        assert summary.drafted == 1
-        assert call_order == ["modify", "draft"]
-
     def test_UNREADはどのアクションでも外さない(self):
         for action in ("archive", "star"):
-            _, mock_modify, _ = _run(
-                [{"message_id": "m1", "action": action, "reason": "r"}], [_message()]
-            )
+            _, mock_modify = _run([_decision(action=action)], {"m1"})
             _, kwargs = mock_modify.call_args
             assert "UNREAD" not in kwargs["remove"]
 
+    def test_ドラフト作成APIは存在しない(self):
+        """送信・下書き系の API をコードベースに戻さないための番人。"""
+        from numa_inbox_zero import gmail
+
+        assert not hasattr(gmail, "create_reply_draft")
+        assert not [name for name in dir(gmail) if "draft" in name.lower()]
+
 
 class TestFailureHandling:
-    def test_ドラフト作成失敗はpartialとして記録される(self):
-        summary, _, _ = _run(
-            [{"message_id": "m1", "action": "reply", "reason": "r", "draft_body": "b"}],
-            [_message()],
-            draft=ValueError("返信先が特定できない"),
-        )
+    def test_ラベル操作の失敗はfailedとして記録される(self):
+        summary, _ = _run([_decision()], {"m1"}, modify=_http_error())
         assert summary.errors == 1
+        assert summary.archived == 0
         record = summary.records[0]
-        assert record.applied == "partial"
-        assert "ドラフト作成に失敗" in record.partial_reason
+        assert record.applied == "failed"
+        assert "ラベル操作に失敗" in record.failure_reason
 
     def test_拒否された判定はrejectedとして記録され件数に入る(self):
-        summary, mock_modify, _ = _run(
-            [{"message_id": "unknown", "action": "archive", "reason": "r"}],
-            [_message()],
-        )
+        summary, mock_modify = _run([_decision(message_id="unknown")], {"m1"})
         assert summary.rejected == 1
         assert summary.archived == 0
         mock_modify.assert_not_called()
@@ -113,16 +77,12 @@ class TestFailureHandling:
 
 class TestDryRun:
     def test_dry_runではAPIを一切呼ばない(self):
-        summary, mock_modify, mock_draft = _run(
-            [
-                {"message_id": "m1", "action": "archive", "reason": "r"},
-                {"message_id": "m2", "action": "reply", "reason": "r", "draft_body": "b"},
-            ],
-            [_message("m1"), _message("m2")],
+        summary, mock_modify = _run(
+            [_decision("m1", "archive"), _decision("m2", "star")],
+            {"m1", "m2"},
             dry_run=True,
         )
         mock_modify.assert_not_called()
-        mock_draft.assert_not_called()
         assert summary.archived == 1
-        assert summary.drafted == 1
+        assert summary.starred == 1
         assert all(r.applied == "dry-run" for r in summary.records)

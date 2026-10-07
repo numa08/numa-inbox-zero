@@ -101,7 +101,8 @@ class Config:
             os.environ.get("NIZ_CF_API_TOKEN") or os.environ.get("CLOUDFLARE_API_TOKEN")
         )
     )
-    # AI Gateway で front する場合のみ設定する。未設定なら api.cloudflare.com 直叩き。
+    # base URL の上書き（既定は api.cloudflare.com）。`/client/v4/accounts/{id}/ai/run` と
+    # 同じ形を話すプロキシを挟むときに使う。AI Gateway は URL の形が違うため非対応。
     cf_base_url: str | None = field(default_factory=lambda: os.environ.get("NIZ_CF_BASE_URL"))
     concurrency: int = field(
         default_factory=lambda: int(os.environ.get("NIZ_CONCURRENCY", DEFAULT_CONCURRENCY))

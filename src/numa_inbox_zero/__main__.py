@@ -307,18 +307,36 @@ def cmd_eval_run(cfg: Config, args) -> int:
         print(f"注意: 未ラベル {unlabeled} 件はスキップします。")
 
     model = args.model or cfg.model
-    policy = load_policy(cfg.policy_path)
-    outcome = classify_mod.run_jev_classifier(
-        messages=evaluate.build_inbox_from_golden(labeled)["messages"],
-        policy=policy,
-        account_id=cfg.cf_account_id,
-        api_token=cfg.cf_api_token,
-        model=model,
-        base_url=cfg.cf_base_url,
-        concurrency=cfg.concurrency,
-    )
+    try:
+        policy = load_policy(cfg.policy_path)
+        outcome = classify_mod.run_jev_classifier(
+            messages=evaluate.build_inbox_from_golden(labeled)["messages"],
+            policy=policy,
+            account_id=cfg.cf_account_id,
+            api_token=cfg.cf_api_token,
+            model=model,
+            base_url=cfg.cf_base_url,
+            concurrency=cfg.concurrency,
+        )
+    except (classify_mod.ClassifyError, PolicyError) as e:
+        print(f"評価を実行できない: {e}", file=sys.stderr)
+        return 1
+
     if outcome.errors:
-        print(f"注意: {len(outcome.errors)} 件が分類に失敗（missing として採点されます）")
+        print(
+            f"注意: {len(outcome.errors)} 件が分類に失敗（missing として採点されます）: "
+            f"{outcome.errors[0]['detail']}",
+            file=sys.stderr,
+        )
+    # 全件失敗なら採点する中身が無い。結果ファイルを書くと「全部 missing の実験」が
+    # 正当な結果として残り、diff の比較対象になってしまうので何も書かずに落とす。
+    if outcome.errors and not outcome.decisions:
+        print(
+            f"全 {len(outcome.errors)} 件が失敗したため結果を保存しない。"
+            "認証情報・権限・プランを確認すること。",
+            file=sys.stderr,
+        )
+        return 1
 
     gated, downgraded = gate_archive(outcome.decisions, policy.thresholds)
     report = evaluate.score_predictions(labeled, gated)

@@ -10,7 +10,7 @@ from numa_inbox_zero.__main__ import (
     cmd_eval_run,
     cmd_eval_sweep,
 )
-from numa_inbox_zero.classify import ClassifyOutcome
+from numa_inbox_zero.classify import ClassifyError, ClassifyOutcome
 from numa_inbox_zero.config import Config
 
 
@@ -190,6 +190,50 @@ class TestEvalRun:
         # 掃引できるよう降格前の判定と生の confidence が残る
         assert result["judgments"]["m1"]["proposed_action"] == "archive"
         assert result["judgments"]["m1"]["confidence"] == 0.1
+
+    def test_全件失敗なら結果ファイルを書かずエラー終了(self, tmp_path, capsys):
+        """全部 missing の実験が正当な結果として残り diff の比較対象になるのを防ぐ。"""
+        cfg = _make_config(tmp_path)
+        _write_golden(cfg, [_golden("m1", "star"), _golden("m2", "archive")])
+        outcome = ClassifyOutcome(
+            decisions=[],
+            errors=[
+                {"message_id": "m1", "detail": "ClassifyError: HTTP 403: permission denied"},
+                {"message_id": "m2", "detail": "ClassifyError: HTTP 403: permission denied"},
+            ],
+        )
+        with patch(
+            "numa_inbox_zero.__main__.classify_mod.run_jev_classifier", return_value=outcome
+        ):
+            code = cmd_eval_run(cfg, argparse.Namespace(name="broken", model=None))
+
+        assert code == 1
+        assert not (cfg.eval_results_dir / "broken.json").exists()
+        # 原因の切り分けに使えるよう、最初の失敗の詳細を出す
+        assert "HTTP 403" in capsys.readouterr().err
+
+    def test_一部失敗なら結果を保存して終了コード0(self, tmp_path):
+        cfg = _make_config(tmp_path)
+        _write_golden(cfg, [_golden("m1", "star"), _golden("m2", "archive")])
+        outcome = _outcome([_judgment("m1", "star")])
+        outcome.errors = [{"message_id": "m2", "detail": "RuntimeError: 429"}]
+        with patch(
+            "numa_inbox_zero.__main__.classify_mod.run_jev_classifier", return_value=outcome
+        ):
+            assert cmd_eval_run(cfg, argparse.Namespace(name="partial", model=None)) == 0
+        result = json.loads((cfg.eval_results_dir / "partial.json").read_text(encoding="utf-8"))
+        assert result["predictions"] == {"m1": "star", "m2": "missing"}
+
+    def test_認証情報が無ければtracebackでなく1行のエラー(self, tmp_path, capsys):
+        cfg = _make_config(tmp_path)
+        _write_golden(cfg, [_golden("m1", "star")])
+        with patch(
+            "numa_inbox_zero.__main__.classify_mod.run_jev_classifier",
+            side_effect=ClassifyError("Cloudflare の認証情報が無い"),
+        ):
+            assert cmd_eval_run(cfg, argparse.Namespace(name="nokey", model=None)) == 1
+        assert "評価を実行できない" in capsys.readouterr().err
+        assert not (cfg.eval_results_dir / "nokey.json").exists()
 
     def test_未ラベルのみならエラー終了(self, tmp_path):
         cfg = _make_config(tmp_path)

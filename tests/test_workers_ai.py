@@ -154,7 +154,7 @@ class TestWorkersAIRequest:
         assert "state" not in body
 
     def test_base_urlを差し替えられる(self):
-        """AI Gateway で front する場合に使う。"""
+        """同じ API 形を話すプロキシを挟めるようにしておく。"""
         recorder = Recorder([_ok()])
         _call(recorder, base_url="https://gateway.example.com/v1/acct/gw/workers-ai")
         assert str(recorder.requests[0].url).startswith("https://gateway.example.com/v1/acct/gw/")

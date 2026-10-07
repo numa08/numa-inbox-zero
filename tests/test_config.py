@@ -126,7 +126,7 @@ class TestCloudflareSettings:
         monkeypatch.setenv("NIZ_MODEL", "@cf/cloudflare/clef")
         assert Config().model == "@cf/cloudflare/clef"
 
-    def test_AI_Gateway用のbase_urlは既定では未設定(self, monkeypatch):
+    def test_base_urlの上書きは既定では未設定(self, monkeypatch):
         monkeypatch.delenv("NIZ_CF_BASE_URL", raising=False)
         assert Config().cf_base_url is None
 

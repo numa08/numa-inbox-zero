@@ -144,7 +144,7 @@ schtasks.exe /Delete /TN "numa-inbox-zero"   # 削除
 | `NIZ_POLL_INTERVAL` | `300` | daemon のポーリング間隔（秒） |
 | `NIZ_CF_ACCOUNT_ID` | — | Cloudflare のアカウント ID（`CLOUDFLARE_ACCOUNT_ID` でも可） |
 | `NIZ_CF_API_TOKEN` | — | Workers AI 実行権限のある API トークン（`CLOUDFLARE_API_TOKEN` でも可） |
-| `NIZ_CF_BASE_URL` | — | AI Gateway で front する場合のみ |
+| `NIZ_CF_BASE_URL` | `https://api.cloudflare.com` | base URL の上書き（同じ API 形を話すプロキシ用。AI Gateway は URL 形が違うため非対応） |
 | `NIZ_MODEL` | `typesafe/jev` | 分類に使うモデル |
 | `NIZ_CONCURRENCY` | `8` | 分類の同時リクエスト数 |
 | `NIZ_LOG_SUBJECTS` | `1` | `0` で decisions.jsonl に件名を記録しない |

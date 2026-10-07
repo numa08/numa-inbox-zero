@@ -44,7 +44,10 @@ INPUT_TOKEN_PRICE_USD = 0.042 / 1_000_000
 
 REQUEST_TIMEOUT_SECONDS = 30.0
 
-# Workers AI の推論エンドポイント。AI Gateway で front する場合は base_url を差し替える。
+# Workers AI の推論エンドポイント。
+# AI Gateway 経由にはこのままでは乗らない: AI Gateway の Workers AI ルートは
+# `/v1/{account}/{gateway}/workers-ai/{model}` でモデルをパスに入れ、body は input だけという
+# 別の形なので、base_url の差し替えでは届かない。必要になったら専用のクライアントを足す。
 WORKERS_AI_BASE_URL = "https://api.cloudflare.com"
 WORKERS_AI_PATH = "/client/v4/accounts/{account_id}/ai/run"
 

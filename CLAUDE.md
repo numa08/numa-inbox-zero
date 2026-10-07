@@ -1,7 +1,7 @@
 # CLAUDE.md
 
-Gmail の受信トレイの未処理メールを Jev（TypeSafe の System One モデル）で分類し、
-アーカイブ / スターを付ける個人用ツール。
+Gmail の受信トレイの未処理メールを Jev（TypeSafe の System One モデル。
+Cloudflare Workers AI の `typesafe/jev` として呼ぶ）で分類し、アーカイブ / スターを付ける個人用ツール。
 設計の全体像と根拠は [SPEC.md](SPEC.md)、利用手順は [README.md](README.md) を先に読むこと。
 
 ## コマンド
@@ -14,8 +14,9 @@ uv run ruff format src tests   # フォーマット
 uv run numa-inbox-zero --help  # CLI
 ```
 
-TypeSafe の API キーは `NIZ_TYPESAFE_API_KEY`（1Password の env mount）で注入する。
+Cloudflare の認証情報は `NIZ_CF_ACCOUNT_ID` / `NIZ_CF_API_TOKEN`（1Password の env mount）で注入する。
 API を呼ぶコマンド（`classify` / `run` / `daemon` / `eval run`）は `op run --env-file=.env.op -- ...` 経由で実行する。
+TypeSafe のキーは不要（Jev は Workers AI 経由で呼ぶ。料金は同額で課金先が Cloudflare になる）。
 
 - パッケージ管理は **uv のみ**。pip / poetry を直接使わない
 - コミット前に `ruff check` と `pytest` が通ること
@@ -30,7 +31,7 @@ src/numa_inbox_zero/
 ├── mail.py       # 純粋な変換処理（本文抽出・ヘッダ処理）。ネットワーク禁止
 ├── gmail.py      # Gmail API ラッパ。Gmail に触るのはこのモジュールだけ
 ├── policy.py     # policy.toml の読み込みと検証。純粋
-├── classify.py   # Jev の呼び出し（1 通 = 1 リクエスト）と判定の組み立て
+├── classify.py   # Jev の呼び出し（Workers AI アダプタ、1 通 = 1 リクエスト）と判定の組み立て
 ├── validate.py   # 分類結果の検証と archive ゲート。セキュリティの砦
 ├── apply.py      # 検証済み判定の Gmail への適用
 ├── runlog.py     # JSONL ログ（runs.jsonl / decisions.jsonl）
@@ -51,15 +52,20 @@ Jev にはシステムプロンプトも出力スキーマ指定も無い。指�
 - **ネットワークを触るコードは `gmail.py` と `classify.py` だけ**。他モジュールに漏らさない
 - 純粋な変換処理は `mail.py` / `policy.py` / `evaluate.py` / `validate.py` に置き、オフラインでテスト可能に保つ
 - 環境変数の読み取りは `config.py` に集約。他モジュールで `os.environ` を直接読まない
-  （`typesafe-sdk` は `TYPESAFE_API_KEY` を自分で読めるが、それに頼らず明示的に渡す）
+- `typesafe-sdk` は**型のためだけ**に使う（`Choice` / `Noul` / `SystemOneResponse`）。
+  HTTP は `WorkersAIClient` が自前で行う。Workers AI は `/ai/run` に `{"model","input":{...}}` を
+  投げる形で、SDK のクライアントが叩く `/v1/systemone`（state / questions が top-level）とは
+  別物なので `base_url` の差し替えでは届かない。**レスポンスは System One と同形**なので、
+  解釈は SDK の型に通して検証する
 - `action`（archive / star）を決めるのはコードだけ。モデルにはカテゴリしか選ばせない
 
 ## テストルール
 
 - フレームワークは pytest。配置は `tests/test_<module>.py`、クラスで機能単位にグルーピング
 - **テスト名は日本語**で「何を保証するか」を書く（例: `test_捏造message_idはdry_runでもrejectedになる`）
-- **テストはネットワークに出ない**。Gmail API は `unittest.mock.patch`、TypeSafe API は
-  `system_one` だけを持つスタブクライアント（`classify_messages(client=...)`）で差し替える。
+- **テストはネットワークに出ない**。Gmail API は `unittest.mock.patch`、分類 API は 2 段で差し替える:
+  判定ロジックは `system_one` だけを持つスタブクライアント（`classify_messages(client=...)`）、
+  HTTP の形は `httpx2.MockTransport`（`tests/test_workers_ai.py`）。
   レスポンスは SDK の実型（`SystemOneResponse.model_validate`）に通してから解釈させ、
   型の変更に気づけるようにする
 - 新しい検証・降格・ログのロジックには必ずテストを付ける。特に以下の性質は回帰させない:
@@ -72,6 +78,8 @@ Jev にはシステムプロンプトも出力スキーマ指定も無い。指�
   - 下書き・送信系の Gmail API 関数がコードベースに存在しない
   - dry-run では Gmail API が一切呼ばれない
   - ログにメールアドレス全体・本文が残らない（ドメインと文字数のみ）
+  - Workers AI のレスポンスは `result` で包まれた形・包まれない形の両方を読める
+  - 401 / 422 は再試行せず、429 / 5xx だけ再試行する
 - テスト失敗を skip / コメントアウトで握りつぶさない
 
 ## セキュリティ不変条件（変更禁止）
@@ -94,7 +102,7 @@ Jev にはシステムプロンプトも出力スキーマ指定も無い。指�
    コードベースに追加しない**
 5. OAuth スコープは `gmail.modify` のみ。スコープを追加しない
 6. 認証情報をコード・ログ・リポジトリに置かない。クライアント設定は `NIZ_CREDENTIALS_JSON`、
-   TypeSafe の API キーは `NIZ_TYPESAFE_API_KEY`（どちらも 1Password env mount）、
+   Cloudflare の認証情報は `NIZ_CF_ACCOUNT_ID` / `NIZ_CF_API_TOKEN`（どちらも 1Password env mount）、
    トークンは XDG state（リポジトリ外）
 
 ## ログと個人情報
@@ -119,7 +127,10 @@ Jev にはシステムプロンプトも出力スキーマ指定も無い。指�
   `archive_recall`（-0.03 まで）で判断し、人間がラベルした行の正答数（`human_labeled`）も見る
 - 閾値のチューニングは `eval sweep`（保存済み結果に対する掃引・API 不要）で行う。
   掃引のために結果ファイルに残している生の `confidence` / `injection` を削らない
-- `NIZ_MODEL` の既定はバージョン固定（`jev-1.13.0`）。confidence の閾値はモデルバージョンごとに
-  較正された値なので、`jev-latest` のような alias を既定にしない。モデルを上げたら閾値を再確認する
-- Gmail API / TypeSafe API の呼び出し形を変えるときは Context7 か公式ドキュメント
-  （docs.typesafe.ai）を確認してから実装する
+- **Workers AI 経由では閾値をモデルバージョンに固定できない。** Cloudflare のモデル ID は
+  `typesafe/jev` でバージョン指定がなく、CF 側が更新すれば中身が動く。一方レスポンスの `model` は
+  実際に答えたバージョン（`jev-1.13.0` 等）を返すので、`runs.jsonl` と eval 結果に記録して
+  **drift を検知する**運用で埋めている。記録されたバージョンが変わったら
+  `eval sweep` で閾値を再確認する（防止はできない。これは Workers AI 経由を選んだ代償）
+- Gmail API / Workers AI の呼び出し形を変えるときは Context7 か公式ドキュメント
+  （docs.typesafe.ai / developers.cloudflare.com/ai/models/typesafe/jev/）を確認してから実装する

@@ -85,9 +85,10 @@ def cmd_classify(cfg: Config, _args) -> int:
         outcome = classify_mod.run_jev_classifier(
             messages=inbox["messages"],
             policy=load_policy(cfg.policy_path),
-            api_key=cfg.typesafe_api_key,
+            account_id=cfg.cf_account_id,
+            api_token=cfg.cf_api_token,
             model=cfg.model,
-            base_url=cfg.typesafe_base_url,
+            base_url=cfg.cf_base_url,
             concurrency=cfg.concurrency,
         )
     except (classify_mod.ClassifyError, PolicyError) as e:
@@ -310,9 +311,10 @@ def cmd_eval_run(cfg: Config, args) -> int:
     outcome = classify_mod.run_jev_classifier(
         messages=evaluate.build_inbox_from_golden(labeled)["messages"],
         policy=policy,
-        api_key=cfg.typesafe_api_key,
+        account_id=cfg.cf_account_id,
+        api_token=cfg.cf_api_token,
         model=model,
-        base_url=cfg.typesafe_base_url,
+        base_url=cfg.cf_base_url,
         concurrency=cfg.concurrency,
     )
     if outcome.errors:

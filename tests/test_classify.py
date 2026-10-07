@@ -193,7 +193,7 @@ class TestClassifyMessages:
 
     def test_バックエンド名とモデルが記録される(self):
         outcome = self._run([_message()], StubClient())
-        assert outcome.backend == "jev"
+        assert outcome.backend == "cloudflare-workers-ai"
         assert outcome.model == "jev-1.13.0"
 
     def test_同じquestionsが全通で使われる(self):
@@ -210,7 +210,15 @@ class TestClassifyMessages:
 
 
 class TestRunJevClassifier:
-    def test_APIキーが無ければ即座にエラー(self):
-        """キー未設定のまま Gmail を触りに行かせない。"""
-        with pytest.raises(ClassifyError, match="API キー"):
-            run_jev_classifier(messages=[_message()], policy=POLICY, api_key=None)
+    def test_認証情報が無ければ即座にエラー(self):
+        """トークン未設定のまま Gmail を触りに行かせない。"""
+        with pytest.raises(ClassifyError, match="Cloudflare の認証情報"):
+            run_jev_classifier(
+                messages=[_message()], policy=POLICY, account_id="acct", api_token=None
+            )
+
+    def test_account_idが無くてもエラー(self):
+        with pytest.raises(ClassifyError, match="Cloudflare の認証情報"):
+            run_jev_classifier(
+                messages=[_message()], policy=POLICY, account_id=None, api_token="token"
+            )

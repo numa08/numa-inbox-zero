@@ -1,7 +1,8 @@
 # numa-inbox-zero 仕様書
 
 Gmail の受信トレイの未処理メールを Jev（TypeSafe の System One モデル）で分類し、
-アーカイブ / スターを自動適用する個人用スクリプト。
+アーカイブ / スターを自動適用する個人用スクリプト。Jev は **Cloudflare Workers AI**
+（`typesafe/jev`）経由で呼ぶ。
 
 ## 1. 全体構成
 
@@ -13,7 +14,7 @@ Gmail の受信トレイの未処理メールを Jev（TypeSafe の System One �
         ┌─────────────────────┼─────────────────────┐
         ▼                     ▼                     ▼
    fetch           →       classify        →       apply
-   Gmail API 読取        Jev /v1/systemone        Gmail API 書込
+   Gmail API 読取       Workers AI /ai/run        Gmail API 書込
         │              （1 通 = 1 リクエスト）           │
      inbox.json        classification.json      runs.jsonl
                                                 decisions.jsonl
@@ -28,7 +29,7 @@ Gmail の受信トレイの未処理メールを Jev（TypeSafe の System One �
 | 言語 | Python 3.12+ |
 | Gmail クライアント | `google-api-python-client` + `google-auth-oauthlib` |
 | OAuth スコープ | `https://www.googleapis.com/auth/gmail.modify` のみ |
-| 分類器 | Jev（`jev-1.13.0`）— TypeSafe System One API。`typesafe-sdk` 経由 |
+| 分類器 | Jev — Cloudflare Workers AI の `typesafe/jev`。HTTP は自前、型は `typesafe-sdk` |
 | 実行環境 | WSL2 上の Python（クラウド移行を想定し、ローカル依存を持たない） |
 | スケジューリング | Windows タスクスケジューラ → `wsl.exe` |
 
@@ -57,7 +58,7 @@ Gmail の受信トレイの未処理メールを Jev（TypeSafe の System One �
 - OAuth クライアント設定は **1Password の env mount** で注入する: `.env.op` に secret reference（`op://...`）を書き、`op run --env-file=.env.op -- ...` で `NIZ_CREDENTIALS_JSON` に JSON の中身が入る。リポジトリにはシークレットも参照先の実体も置かない。
 - フォールバックとしてファイルパス（`NIZ_CREDENTIALS` / `./credentials.json`）も受け付ける。
 - リフレッシュトークンは書き戻しが必要なためファイルで持つが、リポジトリ外（XDG state）に置く。
-- TypeSafe の API キーは `NIZ_TYPESAFE_API_KEY`（1Password の env mount）で渡す。SDK 標準の `TYPESAFE_API_KEY` もフォールバックとして読む。コードにハードコードしない。環境変数の読み取りは `config.py` に集約し、クライアント生成時に明示的に渡す。
+- Cloudflare の認証情報は `NIZ_CF_ACCOUNT_ID` / `NIZ_CF_API_TOKEN`（1Password の env mount）で渡す。CF 慣習の `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` もフォールバックとして読む（wrangler と環境を共有できる）。コードにハードコードしない。環境変数の読み取りは `config.py` に集約し、クライアント生成時に明示的に渡す。TypeSafe のキーは使わない。
 - ログにトークンの中身・メール本文の全文は書かない（件名は記録する。§6 参照）。
 
 ## 3. フェーズ1: fetch
@@ -107,11 +108,14 @@ in:inbox -is:starred -label:numa-inbox-zero/processed newer_than:7d
 
 ### リクエスト
 
-`POST https://api.typesafe.ai/v1/systemone` を **1 通につき 1 回**呼ぶ（`typesafe-sdk` の `AsyncTypeSafeClient`、同時 8 並列）。
+`POST https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run` を **1 通につき 1 回**呼ぶ（同時 8 並列）。認証は `Authorization: Bearer <CF API トークン>`。
+
+TypeSafe 直叩き（`api.typesafe.ai/v1/systemone`、state / questions が top-level）とはパスも body の形も違うため、`typesafe-sdk` のクライアントは使わず `WorkersAIClient` が HTTP を自前で行う。SDK は `Choice` / `Noul` / `SystemOneResponse` の**型のためだけ**に使う。
 
 ```jsonc
 {
-  "model": "jev-1.13.0",
+  "model": "typesafe/jev",
+  "input": {
   "state": {
     "sender_name": "Taro Yamada",
     "sender_domain": "example.com",
@@ -134,8 +138,13 @@ in:inbox -is:starred -label:numa-inbox-zero/processed newer_than:7d
       "criteria": { "true": "...", "false": "..." }
     }
   }
+  }
 }
 ```
+
+レスポンスは System One と同形（`{"model":"jev-1.13.0","answers":{...},"usage":{...}}`）なので、解釈は SDK の `SystemOneResponse` に通して検証する。Cloudflare の REST が `{"result":...,"success":...,"errors":[...]}` で包む場合も読めるようにしてある（モデルページの例は包まれていないが、実機で確かめるまで決め打ちしない）。
+
+429 / 5xx は指数バックオフで最大 4 回まで再試行する（`Retry-After` があれば従う）。401 / 422 は設定ミスなので再試行しない。
 
 **なぜ 50 通を 1 リクエストにまとめないのか。**
 
@@ -250,7 +259,7 @@ Jev では message_id をモデルに渡していないため 2 は構造的に�
     "truncated_bodies": 3
   },
   "classify": {
-    "backend": "jev",
+    "backend": "cloudflare-workers-ai",
     "model": "jev-1.13.0",
     "usage": { "input_tokens": 29808, "output_tokens": 594, "requests": 27 },
     "total_cost_usd": 0.00125,
@@ -268,7 +277,8 @@ Jev では message_id をモデルに渡していないため 2 は構造的に�
 }
 ```
 
-- `backend` は `jev`。バックエンドを差し替えてもフィールド名を変えずに同じ JSONL に追記でき、移行前後のコストを直接比較できる
+- `backend` は `cloudflare-workers-ai`。同じ Jev でも課金先が違うため経路を区別する。フィールド名は変えずに同じ JSONL に追記できるので、移行前後のコストを直接比較できる
+- `model` はレスポンスが返した実バージョン（`jev-1.13.0` 等）。Workers AI のモデル ID はバージョン指定を持たないため、**閾値の前提が動いたことはここでしか検知できない**（§12）
 - `total_cost_usd` は `input_tokens × $0.042/Mtok` の計算値（出力は無料）。実際の課金額はコンソール側が正で、これは概算
 - `classify.errors` は分類に失敗した通。次回の実行で再試行される
 - `apply.downgraded` は archive ゲートで star に落ちた件数。ここが多いときは閾値かカテゴリ定義を見直す
@@ -401,17 +411,21 @@ numa-inbox-zero/
 
 ## 10. クラウド移行（未実装）
 
-claude CLI への依存が消えたことで、必要なものは Python ランタイムと 2 つの HTTPS 送信先（Gmail API・TypeSafe API）だけになった。移行時に決めるのは以下。
+最終的な実行先は **Cloudflare Workers** を想定している。分類の呼び出しは既に Workers AI 経由なので、Worker 上では `env.AI.run('typesafe/jev', {state, questions})` に置き換わるだけで、認証情報も増えない（バインディングで足りる）。残るのは以下。
 
-- **実行形態**: cron 相当のスケジュール実行（Cloud Run Jobs / Lambda / GitHub Actions）。daemon 常駐は不要になる
-- **OAuth リフレッシュトークンの置き場所**: 現在は XDG state のファイル。書き戻しが必要なため、Secret Manager 等の読み書き可能なストアか、実行のたびに取得・更新する経路が必要
-- **API キー**: Secret Manager から環境変数に注入する（現在の 1Password env mount と同じ形）
-- **ログ**: 追記専用 JSONL をどこに置くか（オブジェクトストレージ or ログサービス）。`eval import` がログの message_id を使うため、読み戻せる場所に置く
+- **言語**: Workers は JS/TS。Python Workers は Pyodide で、`google-api-python-client`（httplib2 のソケット前提）と `httpx2` が動かないため、現行コードはそのままでは載らない
+- **subrequest 上限**: 50 通で `Jev 50 + list 1 + get 50 + modify 50 ≈ 151`。無料プランは 50/request・CPU 10ms なので **Workers Paid 前提**
+- **同時接続**: ヘッダ待ち 6 本までなので `NIZ_CONCURRENCY` を 6 以下にする
+- **OAuth リフレッシュトークン**: ローテートしないので Secrets に置き、実行ごとにアクセストークンを発行すれば**書き込み可能なストアは不要**
+- **ログ**: 追記専用 JSONL をどこに置くか（D1 が候補。`eval import` がログの message_id を使うため読み戻せる場所に置く）
+- Cloudflare 自前の **Clef**（`@cf/cloudflare/clef`、Jev と drop-in 互換、Apache 2.0）も同じ経路で呼べる。confidence の較正は別物なので、乗り換えるなら `eval sweep` で閾値を取り直す
 
 ## 11. 未決事項
 
 - 初回実行時に既存の未処理メールが大量にある場合の扱い。`newer_than:7d` より古いメールは永久に無視されるため（§3）、以下のいずれかを選ぶ必要がある: (a) 手動で片付ける、(b) 初回だけ `newer_than` を外して全件流す、(c) `newer_than:90d` 等で段階的に広げる。
 - `thresholds.archive_confidence` の最終値。`eval sweep` で false archive が 0 になる最小の閾値を選ぶ（暫定 0.85）。
+- Workers AI のレスポンスが `{"result":...}` で包まれるかどうか。両方読めるようにしてあるが、実機で 1 回叩いて確定させる。
+- サードパーティモデル（`typesafe/jev`）の利用に Workers Paid が必要かどうか。
 - 日本語メールでの実測精度。Jev の主要学習言語は英語で、CJK は精度が劣ると公式に明記されている。`eval run` でゴールデンセットに対して測り、`baseline-sonnet` と比較して判断する。
 
 ## 12. 実装時の注意
@@ -419,7 +433,7 @@ claude CLI への依存が消えたことで、必要なものは Python ラン�
 - `gmail.py` を書き換えるときは Context7 で `google-api-python-client` のドキュメントを確認すること。
 - Jev の質問は**書いた条件そのまま**に答える。「言いたかったこと」は伝わらないので、境界例は `description` に明示的に書く（`calendar_rsvp` に「招待そのものはこのカテゴリではない」と書いてあるのはこのため）。
 - Jev に計算・日付比較・カウント・文章生成をさせない。いずれも公式に苦手と明記されている領域で、このシステムでは判断以外をすべてコード側に置いている。
-- `confidence` の閾値は**モデルバージョンごとに較正された値**である。`jev-latest` のような alias を既定にせず、バージョンを固定する（`DEFAULT_MODEL`）。モデルを上げるときは `eval run` → `eval sweep` で閾値を再確認する。
+- `confidence` の閾値は**モデルバージョンごとに較正された値**である。ところが Workers AI のモデル ID は `typesafe/jev` でバージョン指定がなく、**固定できない**。代わりにレスポンスの `model`（`jev-1.13.0` 等）を `runs.jsonl` と eval 結果に記録し、変わったことを検知して `eval sweep` で閾値を取り直す。これは Workers AI 経由を選んだ代償であり、TypeSafe 直叩きに戻せばバージョン固定は可能。
 
 ## 13. オフライン評価（eval）
 

@@ -65,7 +65,7 @@ class TestCmdClassify:
         classification = json.loads(cfg.classification_path.read_text(encoding="utf-8"))
         assert classification["decisions"][0]["message_id"] == "m1"
         meta = json.loads(cfg.classify_meta_path.read_text(encoding="utf-8"))
-        assert meta["backend"] == "jev"
+        assert meta["backend"] == "cloudflare-workers-ai"
         assert meta["usage"]["requests"] == 1
 
     def test_対象なしならAPIを呼ばない(self, tmp_path):

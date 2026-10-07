@@ -81,40 +81,54 @@ class TestDaemonSettings:
         assert poll_interval_seconds() == 60
 
 
-class TestTypeSafeSettings:
-    def test_NIZ_TYPESAFE_API_KEYを読む(self, monkeypatch):
-        monkeypatch.setenv("NIZ_TYPESAFE_API_KEY", "niz-key")
-        monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
-        assert Config().typesafe_api_key == "niz-key"
+class TestCloudflareSettings:
+    def test_NIZ_CF_ACCOUNT_IDとNIZ_CF_API_TOKENを読む(self, monkeypatch):
+        monkeypatch.setenv("NIZ_CF_ACCOUNT_ID", "acct-niz")
+        monkeypatch.setenv("NIZ_CF_API_TOKEN", "token-niz")
+        monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+        monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
+        cfg = Config()
+        assert cfg.cf_account_id == "acct-niz"
+        assert cfg.cf_api_token == "token-niz"
 
-    def test_SDK標準のTYPESAFE_API_KEYもフォールバックとして読む(self, monkeypatch):
-        monkeypatch.delenv("NIZ_TYPESAFE_API_KEY", raising=False)
-        monkeypatch.setenv("TYPESAFE_API_KEY", "sdk-key")
-        assert Config().typesafe_api_key == "sdk-key"
+    def test_CF慣習の環境変数もフォールバックとして読む(self, monkeypatch):
+        """wrangler 等と環境を共有できるようにする。"""
+        monkeypatch.delenv("NIZ_CF_ACCOUNT_ID", raising=False)
+        monkeypatch.delenv("NIZ_CF_API_TOKEN", raising=False)
+        monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "acct-cf")
+        monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "token-cf")
+        cfg = Config()
+        assert cfg.cf_account_id == "acct-cf"
+        assert cfg.cf_api_token == "token-cf"
 
     def test_NIZ側が優先される(self, monkeypatch):
-        monkeypatch.setenv("NIZ_TYPESAFE_API_KEY", "niz-key")
-        monkeypatch.setenv("TYPESAFE_API_KEY", "sdk-key")
-        assert Config().typesafe_api_key == "niz-key"
+        monkeypatch.setenv("NIZ_CF_ACCOUNT_ID", "acct-niz")
+        monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "acct-cf")
+        assert Config().cf_account_id == "acct-niz"
 
     def test_未設定ならNone(self, monkeypatch):
-        monkeypatch.delenv("NIZ_TYPESAFE_API_KEY", raising=False)
-        monkeypatch.delenv("TYPESAFE_API_KEY", raising=False)
-        assert Config().typesafe_api_key is None
+        for name in (
+            "NIZ_CF_ACCOUNT_ID",
+            "NIZ_CF_API_TOKEN",
+            "CLOUDFLARE_ACCOUNT_ID",
+            "CLOUDFLARE_API_TOKEN",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        cfg = Config()
+        assert cfg.cf_account_id is None
+        assert cfg.cf_api_token is None
 
-    def test_モデルの既定はバージョン固定(self, monkeypatch):
-        """confidence の閾値はモデルバージョンに紐づくため alias を既定にしない。"""
+    def test_既定モデルはWorkersAIのID(self, monkeypatch):
         monkeypatch.delenv("NIZ_MODEL", raising=False)
-        assert Config().model == DEFAULT_MODEL
-        assert DEFAULT_MODEL != "jev-latest"
+        assert Config().model == DEFAULT_MODEL == "typesafe/jev"
 
     def test_NIZ_MODELでモデルを変えられる(self, monkeypatch):
-        monkeypatch.setenv("NIZ_MODEL", "jev-preview")
-        assert Config().model == "jev-preview"
+        monkeypatch.setenv("NIZ_MODEL", "@cf/cloudflare/clef")
+        assert Config().model == "@cf/cloudflare/clef"
 
-    def test_ゲートウェイ経由にするbase_urlは既定では未設定(self, monkeypatch):
-        monkeypatch.delenv("NIZ_TYPESAFE_BASE_URL", raising=False)
-        assert Config().typesafe_base_url is None
+    def test_AI_Gateway用のbase_urlは既定では未設定(self, monkeypatch):
+        monkeypatch.delenv("NIZ_CF_BASE_URL", raising=False)
+        assert Config().cf_base_url is None
 
     def test_ポリシーはpolicy_tomlを指す(self):
         assert Config().policy_path.name == "policy.toml"

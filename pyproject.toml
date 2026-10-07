@@ -1,7 +1,7 @@
 [project]
 name = "numa-inbox-zero"
 version = "0.1.0"
-description = "Gmail の受信トレイの未処理メールを Jev で分類してアーカイブ / スターを付ける個人用ツール"
+description = "Gmail の受信トレイの未処理メールを Jev（Cloudflare Workers AI）で分類してアーカイブ / スターを付ける個人用ツール"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
@@ -9,6 +9,7 @@ dependencies = [
     "google-api-python-client>=2.140",
     "google-auth-oauthlib>=1.2",
     "typesafe-sdk>=0.7.2",
+    "httpx2>=2.13",
 ]
 
 [project.scripts]

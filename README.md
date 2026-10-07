@@ -1,6 +1,6 @@
 # numa-inbox-zero
 
-Gmail の受信トレイの未処理メールを [Jev](https://typesafe.ai)（TypeSafe の System One モデル）で分類し、アーカイブ / スターを自動適用する個人用ツール。設計の詳細は [SPEC.md](SPEC.md)。ライセンスは [MIT](LICENSE)。
+Gmail の受信トレイの未処理メールを [Jev](https://typesafe.ai)（TypeSafe の System One モデル。[Cloudflare Workers AI](https://developers.cloudflare.com/ai/models/typesafe/jev/) 経由で呼ぶ）で分類し、アーカイブ / スターを自動適用する個人用ツール。設計の詳細は [SPEC.md](SPEC.md)。ライセンスは [MIT](LICENSE)。
 
 判定は「読む必要がない → archive」「自分の目で確認が必要 → star」の 2 値。確信が足りないもの・本文が自動処理系に指示を出そうとしているものは archive せず star に倒す。メールの送信・下書き作成は一切行わない。
 
@@ -12,11 +12,17 @@ Gmail の受信トレイの未処理メールを [Jev](https://typesafe.ai)（Ty
 uv sync
 ```
 
-### TypeSafe（Jev）の API キー
+### Cloudflare の認証情報
 
-[console.typesafe.ai](https://console.typesafe.ai/) でキーを発行し、1Password のアイテムに保存して `.env.op` の `NIZ_TYPESAFE_API_KEY` に secret reference を書く。SDK 標準の `TYPESAFE_API_KEY` でも読める。
+Jev は Cloudflare Workers AI の `typesafe/jev` として呼ぶので、必要なのは **Cloudflare の API トークンとアカウント ID** であり、TypeSafe のキーは要らない。料金は TypeSafe 直叩きと同額（入力 $0.042/Mtok・出力無料）で、課金は Cloudflare に乗る。
 
-**`.env.op` が無いと `run.sh` はキーを注入しない。** run.sh は `.env.op` があるときだけ `op run` を通すため、ファイルが無いと分類が毎サイクル失敗する（`logs/scheduler.log` に「分類を実行できない」が残る）。`cp .env.op.example .env.op` を忘れないこと。
+1. Cloudflare ダッシュボードで **Workers AI の実行権限**を持つ API トークンを発行する
+2. アカウント ID とトークンを 1Password のアイテムに保存する
+3. `cp .env.op.example .env.op` して `op://` 参照を自分の vault / item に合わせる
+
+CF 慣習の `CLOUDFLARE_ACCOUNT_ID` / `CLOUDFLARE_API_TOKEN` でも読めるので、wrangler と環境を共有できる。
+
+**`.env.op` が無いと `run.sh` は認証情報を注入しない。** run.sh は `.env.op` があるときだけ `op run` を通すため、ファイルが無いと分類が毎サイクル失敗する（`logs/scheduler.log` に「分類を実行できない」が残る）。`cp .env.op.example .env.op` を忘れないこと。
 
 ### Google 認証（1Password 経由）
 
@@ -136,9 +142,10 @@ schtasks.exe /Delete /TN "numa-inbox-zero"   # 削除
 | `NIZ_ACCOUNT` | `default` | `--account` の既定値 |
 | `NIZ_ACCOUNTS` | `default` | run.sh / daemon が巡回するアカウント（カンマ区切り） |
 | `NIZ_POLL_INTERVAL` | `300` | daemon のポーリング間隔（秒） |
-| `NIZ_TYPESAFE_API_KEY` | — | TypeSafe の API キー（`TYPESAFE_API_KEY` でも可） |
-| `NIZ_TYPESAFE_BASE_URL` | — | OpenRouter 等のゲートウェイ経由にする場合のみ |
-| `NIZ_MODEL` | `jev-1.13.0` | 分類に使うモデル |
+| `NIZ_CF_ACCOUNT_ID` | — | Cloudflare のアカウント ID（`CLOUDFLARE_ACCOUNT_ID` でも可） |
+| `NIZ_CF_API_TOKEN` | — | Workers AI 実行権限のある API トークン（`CLOUDFLARE_API_TOKEN` でも可） |
+| `NIZ_CF_BASE_URL` | — | AI Gateway で front する場合のみ |
+| `NIZ_MODEL` | `typesafe/jev` | 分類に使うモデル |
 | `NIZ_CONCURRENCY` | `8` | 分類の同時リクエスト数 |
 | `NIZ_LOG_SUBJECTS` | `1` | `0` で decisions.jsonl に件名を記録しない |
 

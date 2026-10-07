@@ -411,6 +411,7 @@ source = { editable = "." }
 dependencies = [
     { name = "google-api-python-client" },
     { name = "google-auth-oauthlib" },
+    { name = "httpx2" },
     { name = "typesafe-sdk" },
 ]
 
@@ -424,6 +425,7 @@ dev = [
 requires-dist = [
     { name = "google-api-python-client", specifier = ">=2.140" },
     { name = "google-auth-oauthlib", specifier = ">=1.2" },
+    { name = "httpx2", specifier = ">=2.13" },
     { name = "typesafe-sdk", specifier = ">=0.7.2" },
 ]
 

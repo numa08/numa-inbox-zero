@@ -171,7 +171,7 @@ class TestEvalRun:
         assert result["predictions"] == {"m1": "star", "m2": "star"}
         assert result["policy_hash"]
         assert result["questions_hash"]
-        assert result["backend"] == "jev"
+        assert result["backend"] == "cloudflare-workers-ai"
         assert result["thresholds"]["archive_confidence"] > 0
 
     def test_採点は本番と同じゲートを通した結果で行われる(self, tmp_path):

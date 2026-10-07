@@ -8,7 +8,7 @@
 認証情報はリポジトリ内に置かない:
 - クライアント設定は 1Password の env mount（NIZ_CREDENTIALS_JSON に JSON の中身）で注入
 - トークンは XDG state（~/.local/state/numa-inbox-zero/）に保存
-- TypeSafe の API キーも env mount（NIZ_TYPESAFE_API_KEY）で注入する
+- Cloudflare の API トークンも env mount（NIZ_CF_API_TOKEN）で注入する
 """
 
 from __future__ import annotations
@@ -40,13 +40,15 @@ BODY_TRUNCATE_CHARS = 2000
 
 GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 
-# Jev の既定モデル。confidence の閾値はモデルバージョンごとに較正されるため、
-# alias（jev-latest）ではなくバージョンを固定する。上げるときは policy.toml の
-# 閾値を eval で再確認する。
-DEFAULT_MODEL = "jev-1.13.0"
+# Workers AI での Jev のモデル ID。Cloudflare 側はバージョン付き ID を公開していないため、
+# **閾値をバージョンに固定できない**（TypeSafe 直叩きの jev-1.13.0 とは違う点）。
+# レスポンスの model は実際に答えたバージョン（jev-1.13.0 等）を返すので、
+# runs.jsonl と eval 結果に記録して drift を検知する運用で埋める。
+# 記録されたバージョンが変わったら policy.toml の閾値を eval sweep で再確認する。
+DEFAULT_MODEL = "typesafe/jev"
 
-# 分類の同時リクエスト数。レート上限は 1200 req/min なので余裕があるが、
-# 50 通を 8 並列で回せば数秒で終わるため上限を狙う必要はない。
+# 分類の同時リクエスト数。ローカル実行では 8 で問題ないが、Workers 上では
+# 「ヘッダ待ち 6 本」の同時接続制限があるため、移行時は 6 以下に下げる。
 DEFAULT_CONCURRENCY = 8
 
 DEFAULT_ACCOUNT = "default"
@@ -86,19 +88,21 @@ class Config:
     logs_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "logs")
     policy_path: Path = field(default_factory=lambda: PROJECT_ROOT / "policy.toml")
 
-    # Jev のモデル ID。閾値は較正済み confidence に紐づくので alias ではなく
-    # バージョンを固定する（policy.toml の閾値とセットで意味を持つ）。
+    # Workers AI のモデル ID（既定 typesafe/jev）。
     model: str = field(default_factory=lambda: os.environ.get("NIZ_MODEL", DEFAULT_MODEL))
-    # SDK 標準の TYPESAFE_API_KEY も受ける（TypeSafe のドキュメントどおりの環境でも動くように）。
-    typesafe_api_key: str | None = field(
+    # Cloudflare の認証情報。wrangler 等と環境を共有できるよう、CF 慣習の名前も受ける。
+    cf_account_id: str | None = field(
         default_factory=lambda: (
-            os.environ.get("NIZ_TYPESAFE_API_KEY") or os.environ.get("TYPESAFE_API_KEY")
+            os.environ.get("NIZ_CF_ACCOUNT_ID") or os.environ.get("CLOUDFLARE_ACCOUNT_ID")
         )
     )
-    # OpenRouter 等のゲートウェイ経由にする場合のみ設定する。未設定なら API 直叩き。
-    typesafe_base_url: str | None = field(
-        default_factory=lambda: os.environ.get("NIZ_TYPESAFE_BASE_URL")
+    cf_api_token: str | None = field(
+        default_factory=lambda: (
+            os.environ.get("NIZ_CF_API_TOKEN") or os.environ.get("CLOUDFLARE_API_TOKEN")
+        )
     )
+    # AI Gateway で front する場合のみ設定する。未設定なら api.cloudflare.com 直叩き。
+    cf_base_url: str | None = field(default_factory=lambda: os.environ.get("NIZ_CF_BASE_URL"))
     concurrency: int = field(
         default_factory=lambda: int(os.environ.get("NIZ_CONCURRENCY", DEFAULT_CONCURRENCY))
     )

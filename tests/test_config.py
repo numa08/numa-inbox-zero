@@ -2,7 +2,12 @@
 
 from pathlib import Path
 
-from numa_inbox_zero.config import Config, accounts_from_env, poll_interval_seconds
+from numa_inbox_zero.config import (
+    DEFAULT_MODEL,
+    Config,
+    accounts_from_env,
+    poll_interval_seconds,
+)
 
 
 class TestAccountSeparation:
@@ -74,3 +79,56 @@ class TestDaemonSettings:
     def test_NIZ_POLL_INTERVALで間隔を変えられる(self, monkeypatch):
         monkeypatch.setenv("NIZ_POLL_INTERVAL", "60")
         assert poll_interval_seconds() == 60
+
+
+class TestCloudflareSettings:
+    def test_NIZ_CF_ACCOUNT_IDとNIZ_CF_API_TOKENを読む(self, monkeypatch):
+        monkeypatch.setenv("NIZ_CF_ACCOUNT_ID", "acct-niz")
+        monkeypatch.setenv("NIZ_CF_API_TOKEN", "token-niz")
+        monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+        monkeypatch.delenv("CLOUDFLARE_API_TOKEN", raising=False)
+        cfg = Config()
+        assert cfg.cf_account_id == "acct-niz"
+        assert cfg.cf_api_token == "token-niz"
+
+    def test_CF慣習の環境変数もフォールバックとして読む(self, monkeypatch):
+        """wrangler 等と環境を共有できるようにする。"""
+        monkeypatch.delenv("NIZ_CF_ACCOUNT_ID", raising=False)
+        monkeypatch.delenv("NIZ_CF_API_TOKEN", raising=False)
+        monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "acct-cf")
+        monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "token-cf")
+        cfg = Config()
+        assert cfg.cf_account_id == "acct-cf"
+        assert cfg.cf_api_token == "token-cf"
+
+    def test_NIZ側が優先される(self, monkeypatch):
+        monkeypatch.setenv("NIZ_CF_ACCOUNT_ID", "acct-niz")
+        monkeypatch.setenv("CLOUDFLARE_ACCOUNT_ID", "acct-cf")
+        assert Config().cf_account_id == "acct-niz"
+
+    def test_未設定ならNone(self, monkeypatch):
+        for name in (
+            "NIZ_CF_ACCOUNT_ID",
+            "NIZ_CF_API_TOKEN",
+            "CLOUDFLARE_ACCOUNT_ID",
+            "CLOUDFLARE_API_TOKEN",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        cfg = Config()
+        assert cfg.cf_account_id is None
+        assert cfg.cf_api_token is None
+
+    def test_既定モデルはWorkersAIのID(self, monkeypatch):
+        monkeypatch.delenv("NIZ_MODEL", raising=False)
+        assert Config().model == DEFAULT_MODEL == "typesafe/jev"
+
+    def test_NIZ_MODELでモデルを変えられる(self, monkeypatch):
+        monkeypatch.setenv("NIZ_MODEL", "@cf/cloudflare/clef")
+        assert Config().model == "@cf/cloudflare/clef"
+
+    def test_base_urlの上書きは既定では未設定(self, monkeypatch):
+        monkeypatch.delenv("NIZ_CF_BASE_URL", raising=False)
+        assert Config().cf_base_url is None
+
+    def test_ポリシーはpolicy_tomlを指す(self):
+        assert Config().policy_path.name == "policy.toml"

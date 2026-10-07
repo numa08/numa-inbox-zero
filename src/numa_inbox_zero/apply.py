@@ -1,8 +1,7 @@
 """分類結果の Gmail への適用。
 
-reply はラベル付与 → ドラフト作成の順で実行する。逆順だと、ドラフト作成後の
-ラベル付与が失敗した場合に次回の実行で同じメールが再取得され、同一スレッドに
-重複ドラフトが作られてしまう（SPEC.md §5）。
+archive も star も「受信トレイから外す + 処理済みラベルを付ける」だけの
+ラベル操作に閉じている。メールの送信・下書き作成は行わない（SPEC.md §5）。
 """
 
 from __future__ import annotations
@@ -19,16 +18,14 @@ from .validate import ValidationResult
 class ApplyRecord:
     message_id: str
     action: str
-    applied: str  # "ok" | "partial" | "failed" | "rejected" | "dry-run"
-    partial_reason: str | None = None
-    draft_id: str | None = None
+    applied: str  # "ok" | "failed" | "rejected" | "dry-run"
+    failure_reason: str | None = None
 
 
 @dataclass
 class ApplySummary:
     archived: int = 0
     starred: int = 0
-    drafted: int = 0
     rejected: int = 0
     errors: int = 0
     records: list[ApplyRecord] = field(default_factory=list)
@@ -38,7 +35,6 @@ def apply_decisions(
     service,
     *,
     validation: ValidationResult,
-    messages_by_id: dict[str, dict],
     processed_label_id: str,
     dry_run: bool,
 ) -> ApplySummary:
@@ -59,12 +55,7 @@ def apply_decisions(
             _count_action(summary, action)
             continue
 
-        record = _apply_one(
-            service,
-            decision=decision,
-            message=messages_by_id[message_id],
-            processed_label_id=processed_label_id,
-        )
+        record = _apply_one(service, decision=decision, processed_label_id=processed_label_id)
         summary.records.append(record)
         if record.applied == "ok":
             _count_action(summary, action)
@@ -79,39 +70,19 @@ def _count_action(summary: ApplySummary, action: str) -> None:
         summary.archived += 1
     elif action == "star":
         summary.starred += 1
-    elif action == "reply":
-        summary.drafted += 1
 
 
-def _apply_one(service, *, decision: dict, message: dict, processed_label_id: str) -> ApplyRecord:
+def _apply_one(service, *, decision: dict, processed_label_id: str) -> ApplyRecord:
     message_id = decision["message_id"]
     action = decision["action"]
 
+    # star もアーカイブする。スター付きメールは受信トレイになくても
+    # 「ピン止め」（スター付き一覧）に表示され、人の対応待ちはそちらが担うため、
+    # 受信トレイは常に空に保つ。
+    add = ["STARRED", processed_label_id] if action == "star" else [processed_label_id]
+
     try:
-        if action == "archive":
-            gmail.modify_labels(service, message_id, add=[processed_label_id], remove=["INBOX"])
-            return ApplyRecord(message_id, action, "ok")
-
-        # star / reply もアーカイブする。スター付きメールは受信トレイになくても
-        # 「ピン止め」（スター付き一覧）に表示され、人の対応待ちはそちらが担うため、
-        # 受信トレイは常に空に保つ
-        if action == "star":
-            gmail.modify_labels(
-                service, message_id, add=["STARRED", processed_label_id], remove=["INBOX"]
-            )
-            return ApplyRecord(message_id, action, "ok")
-
-        # reply: ラベル先行（モジュール docstring 参照）
-        gmail.modify_labels(
-            service, message_id, add=["STARRED", processed_label_id], remove=["INBOX"]
-        )
+        gmail.modify_labels(service, message_id, add=add, remove=["INBOX"])
     except HttpError as e:
-        return ApplyRecord(message_id, action, "failed", f"ラベル付与に失敗: {e}")
-
-    try:
-        draft_id = gmail.create_reply_draft(service, message, decision["draft_body"])
-        return ApplyRecord(message_id, action, "ok", draft_id=draft_id)
-    except (HttpError, ValueError) as e:
-        return ApplyRecord(
-            message_id, action, "partial", f"ラベルは付与済み、ドラフト作成に失敗: {e}"
-        )
+        return ApplyRecord(message_id, action, "failed", f"ラベル操作に失敗: {e}")
+    return ApplyRecord(message_id, action, "ok")

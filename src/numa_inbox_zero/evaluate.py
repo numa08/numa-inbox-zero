@@ -7,7 +7,13 @@
   per-message の予測を残し、diff で「判定が変わった件」を出せるようにする
 
 誤りコストは非対称: false archive（重要メールの見逃し）が最も高い。
-主要メトリクスは archive_precision と reply_recall の 2 つ。
+主要メトリクスは archive_precision（低下不可）と archive_recall（受信トレイを
+空にできている度合い）の 2 つ。
+
+ゴールデンセットの大半は expected_action が null = 過去の実行の判定への同意で
+作られている。つまり archive_recall は「過去のモデルとの一致度」であり、
+独立した正解ではない。人間が明示的に上書きした行だけが独立した信号なので、
+その部分集合を別途集計して報告する。
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .validate import VALID_ACTIONS
+from .policy import VALID_ACTIONS
 
 # 分類器が判定を返さなかったメールの擬似アクション。
 # 見逃しも誤りとして混同行列に現れるようにする。
@@ -50,11 +56,15 @@ def split_labeled(entries: list[dict]) -> tuple[list[dict], int]:
     """
     labeled = []
     for entry in entries:
-        expected = entry.get("expected_action")
+        explicit = entry.get("expected_action")
+        expected = explicit
         if expected is None and entry.get("system_action") in VALID_ACTIONS:
             expected = entry["system_action"]
         if expected in VALID_ACTIONS:
-            labeled.append({**entry, "expected_action": expected})
+            # human_labeled = 人間が明示的にラベルを書いた行。独立した正解として扱える
+            labeled.append(
+                {**entry, "expected_action": expected, "human_labeled": explicit in VALID_ACTIONS}
+            )
     return labeled, len(entries) - len(labeled)
 
 
@@ -125,8 +135,10 @@ class ScoreReport:
     correct: int
     accuracy: float | None
     archive_precision: float | None
-    reply_recall: float | None
+    archive_recall: float | None
     confusion: dict[str, dict[str, int]]
+    human_labeled_total: int = 0
+    human_labeled_correct: int = 0
     mismatches: list[dict] = field(default_factory=list)
     predictions: dict[str, str] = field(default_factory=dict)
 
@@ -136,7 +148,10 @@ def score_predictions(labeled: list[dict], decisions: list[dict]) -> ScoreReport
 
     - archive_precision: archive と予測したうち正解だった割合。
       false archive（重要メールの見逃し）を許さないための主要メトリクス。
-    - reply_recall: 正解が reply のうち reply と予測できた割合。
+    - archive_recall: 正解が archive のうち archive できた割合。
+      受信トレイをどれだけ空にできているかを表す。
+    - human_labeled_*: expected_action を人間が明示した行だけの正答数。
+      残りの行の正解は過去のモデルの判定なので、こちらが独立した信号。
     """
     predicted_by_id = {str(d.get("message_id")): d for d in decisions}
 
@@ -147,6 +162,8 @@ def score_predictions(labeled: list[dict], decisions: list[dict]) -> ScoreReport
     mismatches: list[dict] = []
     predictions: dict[str, str] = {}
     correct = 0
+    human_total = 0
+    human_correct = 0
 
     for entry in labeled:
         message = entry["message"]
@@ -159,8 +176,12 @@ def score_predictions(labeled: list[dict], decisions: list[dict]) -> ScoreReport
 
         confusion[expected][got] += 1
         predictions[message_id] = got
+        if entry.get("human_labeled"):
+            human_total += 1
         if got == expected:
             correct += 1
+            if entry.get("human_labeled"):
+                human_correct += 1
         else:
             mismatches.append(
                 {
@@ -168,21 +189,24 @@ def score_predictions(labeled: list[dict], decisions: list[dict]) -> ScoreReport
                     "subject": message.get("subject", ""),
                     "expected": expected,
                     "got": got,
+                    "human_labeled": bool(entry.get("human_labeled")),
                     "model_reason": (decision or {}).get("reason", ""),
                 }
             )
 
     total = len(labeled)
     predicted_archive = sum(confusion[e]["archive"] for e in actions)
-    expected_reply = sum(confusion["reply"].values())
+    expected_archive = sum(confusion["archive"].values())
 
     return ScoreReport(
         total=total,
         correct=correct,
         accuracy=_ratio(correct, total),
         archive_precision=_ratio(confusion["archive"]["archive"], predicted_archive),
-        reply_recall=_ratio(confusion["reply"]["reply"], expected_reply),
+        archive_recall=_ratio(confusion["archive"]["archive"], expected_archive),
         confusion=confusion,
+        human_labeled_total=human_total,
+        human_labeled_correct=human_correct,
         mismatches=mismatches,
         predictions=predictions,
     )
@@ -214,13 +238,48 @@ def golden_hash(labeled: list[dict]) -> str:
     return digest.hexdigest()[:12]
 
 
+def questions_hash(payload: dict) -> str:
+    """実際に送った questions の内容のハッシュ。
+
+    policy.toml のカテゴリ定義とコード側の instructions の両方を含むため、
+    「この文言でこのスコアが出た」を結果ファイルに固定できる。
+    """
+    digest = hashlib.sha256()
+    digest.update(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode())
+    return digest.hexdigest()[:12]
+
+
+def build_judgments(decisions: list[dict]) -> dict[str, dict]:
+    """閾値の掃引に必要な生の判定値だけを取り出す。
+
+    掃引を保存済みの結果に対して行えるようにするため、
+    確率は丸めずそのまま残す（API を再度叩かせない）。
+    """
+    return {
+        str(d.get("message_id")): {
+            "category": d.get("category"),
+            # 降格前の action（= policy のカテゴリ対応そのまま）
+            "proposed_action": d.get("downgraded_from") or d.get("action"),
+            "confidence": d.get("confidence"),
+            "injection": d.get("injection"),
+            "applied_action": d.get("action"),
+        }
+        for d in decisions
+        if d.get("message_id")
+    }
+
+
 def build_result(
     *,
     name: str,
     model: str | None,
+    backend: str,
     policy_hash: str,
+    questions: str,
     golden: str,
+    thresholds: dict,
     report: ScoreReport,
+    judgments: dict,
     cost_usd: float | None,
     usage: dict,
     executed_at: str,
@@ -229,19 +288,27 @@ def build_result(
         "name": name,
         "executed_at": executed_at,
         "model": model,
+        "backend": backend,
         "policy_hash": policy_hash,
+        "questions_hash": questions,
         "golden_hash": golden,
         "golden_count": report.total,
+        "thresholds": thresholds,
         "metrics": {
             "archive_precision": report.archive_precision,
-            "reply_recall": report.reply_recall,
+            "archive_recall": report.archive_recall,
             "accuracy": report.accuracy,
+        },
+        "human_labeled": {
+            "total": report.human_labeled_total,
+            "correct": report.human_labeled_correct,
         },
         "confusion": report.confusion,
         "cost_usd": cost_usd,
         "usage": usage,
         "mismatches": report.mismatches,
         "predictions": report.predictions,
+        "judgments": judgments,
     }
 
 
@@ -257,7 +324,7 @@ def diff_results(a: dict, b: dict, golden_by_id: dict[str, dict] | None = None) 
             "ゴールデンセットが異なる実験同士の比較。メトリクス差分は参考値にしかならない。"
         )
 
-    metric_names = ("archive_precision", "reply_recall", "accuracy")
+    metric_names = ("archive_precision", "archive_recall", "accuracy")
     metrics = {
         name: {
             "a": a["metrics"].get(name),
@@ -332,3 +399,85 @@ def format_diff(diff: dict) -> str:
     else:
         lines.append("\n判定が変わったメールはない。")
     return "\n".join(lines)
+
+
+# 掃引する confidence 閾値の既定グリッド。観測された confidence 自体も候補に加える。
+SWEEP_GRID = (0.5, 0.6, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95)
+
+
+def sweep_thresholds(
+    labeled: list[dict],
+    judgments: dict[str, dict],
+    *,
+    injection_threshold: float,
+) -> list[dict]:
+    """保存済みの判定に対して archive の confidence 閾値を掃引する。
+
+    API を再度叩かず、結果ファイルの生の confidence から採点し直す。
+    ゲートの計算は validate.gate_archive をそのまま使うので、
+    掃引結果と本番の挙動がずれない。
+    """
+    from .policy import Thresholds
+    from .validate import gate_archive
+
+    proposed = [
+        {
+            "message_id": message_id,
+            "action": judgment.get("proposed_action"),
+            "confidence": judgment.get("confidence"),
+            "injection": judgment.get("injection"),
+        }
+        for message_id, judgment in judgments.items()
+    ]
+
+    observed = {
+        round(float(j["confidence"]), 2)
+        for j in judgments.values()
+        if isinstance(j.get("confidence"), int | float)
+    }
+    candidates = sorted(observed | set(SWEEP_GRID))
+
+    rows = []
+    for threshold in candidates:
+        gated, downgraded = gate_archive(
+            proposed, Thresholds(archive_confidence=threshold, injection=injection_threshold)
+        )
+        report = score_predictions(labeled, gated)
+        rows.append(
+            {
+                "archive_confidence": threshold,
+                "archive_precision": report.archive_precision,
+                "archive_recall": report.archive_recall,
+                "accuracy": report.accuracy,
+                # false archive = 本来 star のメールをアーカイブした件数。最も避けたい誤り
+                "false_archive": report.confusion["star"]["archive"],
+                "archived": sum(report.confusion[e]["archive"] for e in sorted(VALID_ACTIONS)),
+                "downgraded": downgraded,
+            }
+        )
+    return rows
+
+
+def format_sweep(rows: list[dict], *, current: float | None = None) -> str:
+    """掃引結果を人間が読む表に整形する。"""
+    header = (
+        f"{'threshold':>9}  {'precision':>9}  {'recall':>7}  {'accuracy':>8}  "
+        f"{'false_arch':>10}  {'archived':>8}"
+    )
+    lines = [header, "-" * len(header)]
+    for row in rows:
+        mark = (
+            " ←現在"
+            if current is not None and abs(row["archive_confidence"] - current) < 1e-9
+            else ""
+        )
+        lines.append(
+            f"{row['archive_confidence']:>9.2f}  {_fmt(row['archive_precision']):>9}  "
+            f"{_fmt(row['archive_recall']):>7}  {_fmt(row['accuracy']):>8}  "
+            f"{row['false_archive']:>10}  {row['archived']:>8}{mark}"
+        )
+    return "\n".join(lines)
+
+
+def _fmt(value: float | None) -> str:
+    return "-" if value is None else f"{value:.4f}"

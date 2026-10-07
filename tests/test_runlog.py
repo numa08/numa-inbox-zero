@@ -94,4 +94,27 @@ class TestBuildDecisionRecord:
             log_subjects=True,
         )
         assert record["applied"] == "rejected"
-        assert record["partial_reason"] == "message_id が入力に存在しない"
+        assert record["failure_reason"] == "message_id が入力に存在しない"
+
+    def test_確信度と降格理由が記録される(self):
+        """閾値のチューニングに使うため、生の確率と降格理由を残す。"""
+        record = build_decision_record(
+            run_id="r1",
+            account="personal",
+            record=ApplyRecord("m1", "star", "ok"),
+            decision={
+                "reason": "r",
+                "category": "delivery_notice",
+                "confidence": 0.72,
+                "injection": 0.01,
+                "downgraded_from": "archive",
+                "downgrade_reason": "confidence=0.72 < 0.85",
+            },
+            message=self._message(),
+            log_subjects=True,
+        )
+        assert record["category"] == "delivery_notice"
+        assert record["confidence"] == 0.72
+        assert record["injection"] == 0.01
+        assert record["downgraded_from"] == "archive"
+        assert record["downgrade_reason"] == "confidence=0.72 < 0.85"

@@ -28,6 +28,18 @@ def _write_work_files(cfg: Config, messages, decisions, meta=None):
         cfg.classify_meta_path.write_text(json.dumps(meta), encoding="utf-8")
 
 
+def _decision(message_id="m1", action="archive", confidence=0.95, **kw):
+    base = {
+        "message_id": message_id,
+        "action": action,
+        "category": "newsletter_promotion",
+        "confidence": confidence,
+        "injection": 0.01,
+        "reason": "通知",
+    }
+    return {**base, **kw}
+
+
 def _message(message_id="m1"):
     return {
         "message_id": message_id,
@@ -45,7 +57,7 @@ class TestCmdApplyDryRun:
         _write_work_files(
             cfg,
             [_message()],
-            [{"message_id": "m1", "action": "archive", "confidence": "high", "reason": "通知"}],
+            [_decision()],
             meta={"total_cost_usd": 0.01},
         )
 
@@ -66,7 +78,7 @@ class TestCmdApplyDryRun:
         _write_work_files(
             cfg,
             [_message()],
-            [{"message_id": "forged-id", "action": "archive", "reason": "x"}],
+            [_decision(message_id="forged-id")],
         )
 
         code = cmd_apply(cfg, argparse.Namespace(dry_run=True))
@@ -82,7 +94,7 @@ class TestCmdApplyDryRun:
             _write_work_files(
                 cfg,
                 [_message()],
-                [{"message_id": "m1", "action": "archive", "confidence": "high", "reason": "r"}],
+                [_decision()],
             )
             assert cmd_apply(cfg, argparse.Namespace(dry_run=True)) == 0
 
@@ -95,13 +107,9 @@ class TestCmdApplyDryRun:
         )
         assert [json.loads(line)["account"] for line in decision_lines] == ["personal", "work"]
 
-    def test_確信度lowのarchiveはstarに降格されログに残る(self, tmp_path):
+    def test_確信度が閾値未満のarchiveはstarに降格されログに残る(self, tmp_path):
         cfg = _make_config(tmp_path)
-        _write_work_files(
-            cfg,
-            [_message()],
-            [{"message_id": "m1", "action": "archive", "confidence": "low", "reason": "境界例"}],
-        )
+        _write_work_files(cfg, [_message()], [_decision(confidence=0.5)])
 
         code = cmd_apply(cfg, argparse.Namespace(dry_run=True))
 
@@ -114,31 +122,46 @@ class TestCmdApplyDryRun:
         decision_record = json.loads(cfg.decisions_log_path.read_text(encoding="utf-8"))
         assert decision_record["action"] == "star"
         assert decision_record["downgraded_from"] == "archive"
-        assert decision_record["confidence"] == "low"
+        assert decision_record["confidence"] == 0.5
 
     def test_confidence欠損のarchiveも降格される(self, tmp_path):
-        """スキーマ拘束が効かなかった場合でも安全側に倒れる。"""
+        """API が確率を返さなかった場合でも安全側に倒れる。"""
         cfg = _make_config(tmp_path)
-        _write_work_files(
-            cfg,
-            [_message()],
-            [{"message_id": "m1", "action": "archive", "reason": "r"}],
-        )
+        decision = _decision()
+        del decision["confidence"]
+        _write_work_files(cfg, [_message()], [decision])
 
         assert cmd_apply(cfg, argparse.Namespace(dry_run=True)) == 0
         run_record = json.loads(cfg.runs_log_path.read_text(encoding="utf-8"))
         assert run_record["apply"]["archived"] == 0
         assert run_record["apply"]["downgraded"] == 1
 
+    def test_インジェクションが疑われるarchiveも降格される(self, tmp_path):
+        cfg = _make_config(tmp_path)
+        _write_work_files(cfg, [_message()], [_decision(injection=0.95)])
+
+        assert cmd_apply(cfg, argparse.Namespace(dry_run=True)) == 0
+        run_record = json.loads(cfg.runs_log_path.read_text(encoding="utf-8"))
+        assert run_record["apply"]["archived"] == 0
+        assert run_record["apply"]["starred"] == 1
+        assert run_record["apply"]["downgraded"] == 1
+
+    def test_policyに無いカテゴリはrejectedになる(self, tmp_path):
+        """モデルの応答と policy.toml がずれても Gmail は変更されない。"""
+        cfg = _make_config(tmp_path)
+        _write_work_files(cfg, [_message()], [_decision(action=None, category="not_in_policy")])
+
+        assert cmd_apply(cfg, argparse.Namespace(dry_run=True)) == 0
+        run_record = json.loads(cfg.runs_log_path.read_text(encoding="utf-8"))
+        assert run_record["apply"]["rejected"] == 1
+        assert run_record["apply"]["archived"] == 0
+
     def test_decisionsが入力件数を超えたら中断して終了コード1(self, tmp_path):
         cfg = _make_config(tmp_path)
         _write_work_files(
             cfg,
             [_message()],
-            [
-                {"message_id": "m1", "action": "archive", "reason": "a"},
-                {"message_id": "m2", "action": "archive", "reason": "b"},
-            ],
+            [_decision("m1"), _decision("m2")],
         )
 
         code = cmd_apply(cfg, argparse.Namespace(dry_run=True))

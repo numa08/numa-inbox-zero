@@ -10,13 +10,36 @@
   （レビューしていない null は「未確認」ではなく「同意」と扱われてしまう）
 - golden.jsonl は**追記のみ**。ラベル付け（expected_action の記入）以外で
   過去のエントリを書き換えない（実験の比較可能性を保つ）
-- 1 実験で変えるのは **1 変数だけ**（モデル or ポリシー or プロンプト）
+- 1 実験で変えるのは **1 変数だけ**（モデル or カテゴリ定義 or 質問文 or 本文切り詰め幅）
 - 合否ゲート:
   - `archive_precision`: ベースラインから**低下不可**（false archive は実害）
-  - `reply_recall`: -0.03 まで許容
+  - `archive_recall`: -0.03 まで許容（受信トレイを空にできている度合い）
+  - `human_labeled`: 人間が明示的にラベルした行の正答数。**下がったら理由を確認する**
   - `accuracy`: 参考値。合否には使わない
 
+**このゴールデンセットの正解の大半は「過去のモデルの判定」である。** `expected_action` が null の行は
+当時の判定（`system_action`、初期は claude Sonnet 5）への同意として採点されるため、
+`archive_precision: 0.95` は「独立した正解に対して 95% 正しい」ではなく
+「旧モデルの判定と 95% 一致している」に近い。人間が明示的に上書きした行だけが独立した信号なので、
+`eval run` はその部分集合（`human_labeled`）を別途集計して報告する。ラベルを増やすほどこのゲートは強くなる。
+
+### 閾値の選び方
+
+`archive_confidence` の掃引は `eval sweep <実験名>` で行う。保存済みの結果ファイルに残した生の
+`confidence` を読み直すだけなので **API を呼ばず追加コストが 0** で、何度でもやり直せる。
+`false_arch`（本来 star のメールをアーカイブした件数）を 0 に保てる最小の閾値を選び、
+`policy.toml` の `[thresholds]` に書く。掃引のゲート計算は本番と同じ `validate.gate_archive` を
+呼んでいるため、掃引で見た数字がそのまま本番の挙動になる。
+
+Workers AI 経由ではモデル ID（`typesafe/jev`）にバージョンが無いため、閾値を固定できない。
+結果ファイルの `model` に実際に答えたバージョンが入るので、**前回と変わっていたら閾値を取り直す**。
+
 ## 実験ログ
+
+2026-09-28 の Jev 移行より前の行は claude CLI バックエンド（生成モデル + JSON スキーマ）での測定で、
+`reply_recall` 列は当時の 2 つ目のゲート（返信要の取りこぼし）。ゴールデンセットに reply の正解が
+1 件も無かったため一度も機能せず、reply アクションの廃止に伴い `archive_recall` に置き換えた。
+`baseline-sonnet` 以降の結果ファイルは同じ golden セットなので、Jev の結果と直接 `eval diff` できる。
 
 | 日付 | 実験名 | 変更 | archive_prec | reply_recall | cost | 判断 |
 |---|---|---|---|---|---|---|
@@ -30,3 +53,5 @@
 | 2026-08-06 | sonnet-policy-v4 | 同 policy v4 を sonnet で測定 | 0.9286 | -（reply 0 件） | $1.01 | 不採用・v3 に戻す（OTP 通知の archive/missing 化、領収書の過剰 star 再発。「件名で star」例示が star バイアスとして作用） |
 | 2026-08-06 | sonnet-v3-htmlbody | mail.py: 本文抽出を text/html 優先に変更（golden の本文 52 件を再取得。policy は v3 のまま） | 0.9556 | -（reply 0 件） | $0.99 | 採用（sonnet は完全に無風。切り詰め対象 23→15 件でコスト微減） |
 | 2026-08-06 | haiku45-v3-htmlbody | 同抽出変更を haiku で測定 | 0.9070 | -（reply 0 件） | $0.35 | haiku 移行は引き続き見送り（policy を汚さず 0.8269→0.9070 まで改善。残る危険側 4 件は golden のラベルノイズ含みで、次バッチのラベル整理後に再判定） |
+| 2026-09-28 | （未測定） | バックエンド: claude CLI → Jev、reply 廃止、policy.md → policy.toml のカテゴリ方式、archive を confidence 0.85 + injection ゲートに変更 | — | — | — | 未実施のまま下の行に統合 |
+| 2026-10-07 | （未測定） | 呼び出し経路を **Cloudflare Workers AI（`typesafe/jev`）** に。本番の実行先を Workers に置く想定なので評価も同じ経路で測る | — | — | — | **CF トークン発行後に `eval run --name jev-v1` → `eval sweep jev-v1` → `eval diff sonnet-v3-htmlbody jev-v1`。日本語での精度は未検証（公式に CJK は英語より劣ると明記）。結果の `model` に実バージョンが入るので記録しておく** |
